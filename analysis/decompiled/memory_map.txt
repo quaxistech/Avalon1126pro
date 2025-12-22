@@ -1,0 +1,47 @@
+Avalon A1126pro Firmware Memory Map
+=====================================
+
+Flash Layout (8MB SPI Flash):
+-----------------------------
+0x000000 - 0x00001C : kflash header (28 bytes)
+0x00001C - 0x00BA00 : Boot code / vectors
+0x00BA00 - 0x095000 : Main application code
+0x095000 - 0x0A8000 : Read-only data / strings
+0x0A8000 - 0x0B8000 : Web interface resources
+0x0B8000 - 0x100000 : RTOS / network stack
+0x100000 - 0x200000 : Reserved / padding
+0x200000 - 0x400000 : Secondary firmware slot (OTA)
+0x400000 - 0x7F0000 : Unused (0xFF)
+0x7F0000 - 0x800000 : Configuration area
+
+K210 Memory Map (Runtime):
+--------------------------
+0x80000000 - 0x805FFFFF : SRAM (6MB)
+0x80600000 - 0x807FFFFF : AI SRAM (2MB)
+0x40000000 - 0x40001FFF : ROM (8KB)
+0x50200000 - 0x503FFFFF : SPI0 XIP
+0x50400000 - 0x505FFFFF : SPI1 XIP
+
+Peripheral Registers:
+---------------------
+0x50200000 : SPI0 (Flash)
+0x50240000 : SPI1
+0x50250000 : SPI Slave
+0x38000000 : GPIO
+0x38001000 : UART1
+0x38002000 : UART2
+0x38003000 : UART3
+0x50440000 : I2C0
+0x50450000 : I2C1
+0x50460000 : I2C2
+
+Key Firmware Addresses:
+-----------------------
+0x09BF55 : "CGMiner" string
+0x09F87F : "avalon10" string
+0x0E433D : "FreeRTOS" string
+0x0E1755 : "lwIP" string
+0x09BCD3 : "pool" string
+0x09CD2D : "hash" string
+0x09DD4C : "nonce" string
+0x09FFF1 : "temperature" string

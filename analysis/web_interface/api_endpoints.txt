@@ -1,0 +1,17 @@
+CGI/API Endpoints found in firmware:
+========================================
+
+.cgi
+admin.cgi
+cgconf.cgi
+cglog.cgi
+login.cgi
+logout.cgi
+network.cgi
+reboot.cgi
+reboot_btn.cgi
+updateadmin.cgi
+updatecgconf.cgi
+updatenetwork.cgi
+updateupgrade.cgi
+upgrade.cgi
