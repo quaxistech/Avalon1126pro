@@ -1,0 +1,5 @@
+# Function list from Avalon A1126pro firmware
+# Address	Name
+ram:80033092	FUN_ram_80033092
+ram:8006f056	FUN_ram_8006f056
+ram:8006f106	FUN_ram_8006f106

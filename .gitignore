@@ -5,9 +5,6 @@
 # Сборка
 build/
 *.o
-*.elf
-*.bin
-*.hex
 *.map
 *.lst
 
@@ -25,8 +22,8 @@ __pycache__/
 .env
 venv/
 
-# SDK (большой, лучше клонировать отдельно)
-kendryte-freertos-sdk/
+# Toolchain (большой, скачивать отдельно)
+kendryte-toolchain/
 
 # Временные файлы
 *.tmp
@@ -36,4 +33,6 @@ kendryte-freertos-sdk/
 # OS
 .DS_Store
 Thumbs.db
+
+# Старые директории cgminer
 cgminer/

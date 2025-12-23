@@ -1,0 +1,3 @@
+Memory Map:
+  ram @ ram:80000000 - ram:800bfff4 (RWX)
+  csr @ csreg:0000 - csreg:0fff.7 (RW)
