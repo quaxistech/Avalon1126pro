@@ -145,7 +145,11 @@ static void w25qxx_wait_busy(void)
     int timeout = 10000;  /* 10 секунд максимум */
     
     do {
-        spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, &status, 1);
+        int ret = spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, &status, 1);
+        if (ret != 0) {
+            log_message(LOG_WARNING, "%s: Ошибка чтения статуса (%d)", TAG, ret);
+            break;
+        }
         if (!(status & W25QXX_SR1_BUSY)) {
             break;
         }
@@ -249,7 +253,9 @@ int w25qxx_read(uint32_t addr, uint8_t *buf, uint32_t len)
     };
     
     /* Отправляем команду и читаем данные */
-    spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), buf, len);
+    if (spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), buf, len) != 0) {
+        return -1;
+    }
     
     return 0;
 #endif
@@ -286,7 +292,9 @@ int w25qxx_write(uint32_t addr, const uint8_t *buf, uint32_t len)
         };
         
         /* Отправляем команду + данные */
-        spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), buf + offset, to_write);
+        if (spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), buf + offset, to_write) != 0) {
+            return -1;
+        }
         
         offset += to_write;
         remaining -= to_write;
@@ -322,7 +330,9 @@ int w25qxx_erase_sector(uint32_t addr)
         addr & 0xFF
     };
     
-    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), NULL, 0);
+    if (spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), NULL, 0) != 0) {
+        return -1;
+    }
     w25qxx_wait_busy();
     
     return 0;
@@ -358,7 +368,9 @@ int w25qxx_erase_block(uint32_t addr)
         addr & 0xFF
     };
     
-    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), NULL, 0);
+    if (spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), NULL, 0) != 0) {
+        return -1;
+    }
     w25qxx_wait_busy();
     
     return 0;
@@ -382,7 +394,9 @@ int w25qxx_erase_chip(void)
     w25qxx_write_enable();
     
     uint8_t cmd = W25QXX_CMD_CHIP_ERASE;
-    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, NULL, 0);
+    if (spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, NULL, 0) != 0) {
+        return -1;
+    }
     
     /* Полное стирание занимает до 200 секунд */
     w25qxx_wait_busy();
