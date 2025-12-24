@@ -37,8 +37,7 @@
 
 /* SDK SPI driver */
 #ifndef MOCK_SPI_FLASH
-#include <devices.h>
-#include <hal.h>
+#include <spi.h>
 #endif
 
 static const char *TAG = "W25QXX";
@@ -72,8 +71,11 @@ static const char *TAG = "W25QXX";
  * =========================================================================== */
 
 #ifndef MOCK_SPI_FLASH
-static handle_t spi_handle = 0;
-static handle_t spi_device = 0;
+#define W25QXX_SPI_DEVICE     SPI_DEVICE_3
+#define W25QXX_SPI_CS         0
+#define W25QXX_SPI_CLK_RATE   25000000
+
+static int spi_initialized = 0;
 #endif
 
 static int w25qxx_initialized = 0;
@@ -114,28 +116,13 @@ static void w25qxx_spi_transfer(const uint8_t *tx, uint8_t *rx, size_t len)
 static void w25qxx_spi_init(void)
 {
     /* SPI0 для Flash, CS0 */
-    spi_handle = io_open("/dev/spi0");
-    if (spi_handle) {
-        spi_device = spi_get_device(spi_handle, SPI_MODE_0, SPI_FF_STANDARD, 0, 8);
-        spi_dev_set_clock_rate(spi_device, 25000000);  /* 25 MHz */
+    if (spi_initialized) {
+        return;
     }
-}
 
-static void w25qxx_cs_low(void)
-{
-    /* CS управляется автоматически драйвером */
-}
-
-static void w25qxx_cs_high(void)
-{
-    /* CS управляется автоматически драйвером */
-}
-
-static void w25qxx_spi_transfer(const uint8_t *tx, uint8_t *rx, size_t len)
-{
-    if (spi_device) {
-        spi_dev_transfer_sequential(spi_device, tx, len, rx, len);
-    }
+    spi_init(W25QXX_SPI_DEVICE, SPI_WORK_MODE_0, SPI_FF_STANDARD, 8, 0);
+    spi_set_clk_rate(W25QXX_SPI_DEVICE, W25QXX_SPI_CLK_RATE);
+    spi_initialized = 1;
 }
 
 #endif /* MOCK_SPI_FLASH */
@@ -158,7 +145,7 @@ static void w25qxx_wait_busy(void)
     int timeout = 10000;  /* 10 секунд максимум */
     
     do {
-        spi_dev_transfer_sequential(spi_device, &cmd, 1, &status, 1);
+        spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, &status, 1);
         if (!(status & W25QXX_SR1_BUSY)) {
             break;
         }
@@ -179,7 +166,7 @@ static void w25qxx_write_enable(void)
 {
 #if !MOCK_SPI_FLASH
     uint8_t cmd = W25QXX_CMD_WRITE_ENABLE;
-    spi_dev_write(spi_device, &cmd, 1);
+    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, NULL, 0);
 #endif
 }
 
@@ -230,14 +217,14 @@ uint32_t w25qxx_read_id(void)
 #if MOCK_SPI_FLASH
     return mock_flash_read_id();
 #else
-    uint8_t tx[4] = { W25QXX_CMD_READ_JEDEC_ID, 0, 0, 0 };
-    uint8_t rx[4] = { 0 };
+    uint8_t cmd = W25QXX_CMD_READ_JEDEC_ID;
+    uint8_t rx[3] = { 0 };
     
-    if (!spi_device) return 0;
+    if (spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, rx, sizeof(rx)) != 0) {
+        return 0;
+    }
     
-    spi_dev_transfer_sequential(spi_device, tx, 4, rx, 4);
-    
-    return ((uint32_t)rx[1] << 16) | ((uint32_t)rx[2] << 8) | rx[3];
+    return ((uint32_t)rx[0] << 16) | ((uint32_t)rx[1] << 8) | rx[2];
 #endif
 }
 
@@ -252,8 +239,6 @@ int w25qxx_read(uint32_t addr, uint8_t *buf, uint32_t len)
 #if MOCK_SPI_FLASH
     return mock_flash_read(addr, buf, len);
 #else
-    if (!spi_device) return -1;
-    
     w25qxx_wait_busy();
     
     uint8_t cmd[4] = {
@@ -264,8 +249,7 @@ int w25qxx_read(uint32_t addr, uint8_t *buf, uint32_t len)
     };
     
     /* Отправляем команду и читаем данные */
-    spi_dev_transfer_sequential(spi_device, cmd, 4, NULL, 0);
-    spi_dev_read(spi_device, buf, len);
+    spi_receive_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), buf, len);
     
     return 0;
 #endif
@@ -282,8 +266,6 @@ int w25qxx_write(uint32_t addr, const uint8_t *buf, uint32_t len)
 #if MOCK_SPI_FLASH
     return mock_flash_write(addr, buf, len);
 #else
-    if (!spi_device) return -1;
-    
     uint32_t remaining = len;
     uint32_t offset = 0;
     
@@ -304,8 +286,7 @@ int w25qxx_write(uint32_t addr, const uint8_t *buf, uint32_t len)
         };
         
         /* Отправляем команду + данные */
-        spi_dev_write(spi_device, cmd, 4);
-        spi_dev_write(spi_device, buf + offset, to_write);
+        spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), buf + offset, to_write);
         
         offset += to_write;
         remaining -= to_write;
@@ -329,8 +310,6 @@ int w25qxx_erase_sector(uint32_t addr)
 #if MOCK_SPI_FLASH
     return mock_flash_erase_sector(addr);
 #else
-    if (!spi_device) return -1;
-    
     log_message(LOG_DEBUG, "%s: Стирание сектора 0x%06X", TAG, addr);
     
     w25qxx_wait_busy();
@@ -343,7 +322,7 @@ int w25qxx_erase_sector(uint32_t addr)
         addr & 0xFF
     };
     
-    spi_dev_write(spi_device, cmd, 4);
+    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), NULL, 0);
     w25qxx_wait_busy();
     
     return 0;
@@ -367,8 +346,6 @@ int w25qxx_erase_block(uint32_t addr)
     }
     return 0;
 #else
-    if (!spi_device) return -1;
-    
     log_message(LOG_DEBUG, "%s: Стирание блока 0x%06X", TAG, addr);
     
     w25qxx_wait_busy();
@@ -381,7 +358,7 @@ int w25qxx_erase_block(uint32_t addr)
         addr & 0xFF
     };
     
-    spi_dev_write(spi_device, cmd, 4);
+    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, cmd, sizeof(cmd), NULL, 0);
     w25qxx_wait_busy();
     
     return 0;
@@ -401,13 +378,11 @@ int w25qxx_erase_chip(void)
     }
     return 0;
 #else
-    if (!spi_device) return -1;
-    
     w25qxx_wait_busy();
     w25qxx_write_enable();
     
     uint8_t cmd = W25QXX_CMD_CHIP_ERASE;
-    spi_dev_write(spi_device, &cmd, 1);
+    spi_send_data_standard(W25QXX_SPI_DEVICE, W25QXX_SPI_CS, &cmd, 1, NULL, 0);
     
     /* Полное стирание занимает до 200 секунд */
     w25qxx_wait_busy();

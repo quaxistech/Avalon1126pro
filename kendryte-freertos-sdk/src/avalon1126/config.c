@@ -58,8 +58,8 @@ int config_load(cgminer_config_t *cfg)
     if (!cfg) return -1;
     
     /* Адрес конфигурации в flash (последний сектор 4KB от 8MB - 4KB) */
-    #define CONFIG_FLASH_ADDR   (8 * 1024 * 1024 - 4096)
-    #define CONFIG_MAGIC        0x41564C4E  /* "AVLN" */
+    #define CONFIG_FLASH_ADDR   (W25QXX_TOTAL_SIZE - W25QXX_SECTOR_SIZE)
+    #define CONFIG_MAGIC        0xDEADBEEF
     
     uint32_t magic = 0;
     uint32_t crc_stored = 0;
@@ -109,8 +109,8 @@ int config_save(const cgminer_config_t *cfg)
 {
     if (!cfg) return -1;
     
-    #define CONFIG_FLASH_ADDR   (8 * 1024 * 1024 - 4096)
-    #define CONFIG_MAGIC        0x41564C4E  /* "AVLN" */
+    #define CONFIG_FLASH_ADDR   (W25QXX_TOTAL_SIZE - W25QXX_SECTOR_SIZE)
+    #define CONFIG_MAGIC        0xDEADBEEF
     
     uint32_t magic = CONFIG_MAGIC;
     uint32_t crc = 0;
