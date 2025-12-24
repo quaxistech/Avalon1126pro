@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #include <FreeRTOS.h>
 #include <task.h>
@@ -189,6 +190,84 @@ static int hex_decode(const char *hex, uint8_t *out, size_t max_len)
     }
     
     return (int)byte_len;
+}
+
+static int parse_subscribe_result(pool_t *pool, const char *line)
+{
+    const char *p;
+    const char *ex1_start = NULL;
+    const char *ex1_end = NULL;
+    char ex1_buf[64] = {0};
+    int depth = 0;
+    
+    if (!pool || !line) {
+        return -1;
+    }
+    
+    p = strstr(line, "\"result\"");
+    if (!p) {
+        return -1;
+    }
+    
+    p = strchr(p, '[');
+    if (!p) {
+        return -1;
+    }
+    
+    /* Ищем конец первого элемента (подписки) в result,
+     * первый символ ',' на глубине 1 после закрытия первой скобки */
+    for (; *p; p++) {
+        if (*p == '[') depth++;
+        else if (*p == ']') depth--;
+        
+        if (depth == 1 && *p == ',' && *(p + 1) == '"') {
+            ex1_start = p + 2; /* Указатель на начало extranonce1 */
+            break;
+        }
+    }
+    
+    if (!ex1_start) {
+        return -1;
+    }
+    
+    ex1_end = strchr(ex1_start, '"');
+    if (!ex1_end || ex1_end <= ex1_start) {
+        return -1;
+    }
+    
+    size_t ex1_len = (size_t)(ex1_end - ex1_start);
+    if (ex1_len == 0) {
+        return -1;
+    }
+    if (ex1_len >= sizeof(ex1_buf)) {
+        ex1_len = sizeof(ex1_buf) - 1;
+    }
+    memcpy(ex1_buf, ex1_start, ex1_len);
+    ex1_buf[ex1_len] = '\0';
+    
+    int decoded = hex_decode(ex1_buf, (uint8_t *)pool->extranonce1, sizeof(pool->extranonce1));
+    if (decoded > 0) {
+        pool->extranonce1_len = decoded;
+    } else {
+        return -1;
+    }
+    
+    /* extranonce2_size после следующей запятой */
+    const char *size_ptr = strchr(ex1_end, ',');
+    if (size_ptr && *(size_ptr + 1) != '\0') {
+        char *endptr = NULL;
+        long val = strtol(size_ptr + 1, &endptr, 10);
+        if (endptr && endptr > size_ptr + 1 && val >= 1 && val <= 8) {
+            pool->extranonce2_len = (int)val;
+        }
+        if (pool->extranonce2_len < 1) pool->extranonce2_len = 4;
+        if (pool->extranonce2_len > 8) pool->extranonce2_len = 8;
+    }
+    
+    log_message(LOG_INFO, "%s: Подписка: extranonce1_len=%d, extranonce2_len=%d",
+                TAG, pool->extranonce1_len, pool->extranonce2_len);
+    
+    return 0;
 }
 
 /**
@@ -389,6 +468,14 @@ static int parse_mining_notify(pool_t *pool, const char *params)
     
     work->timestamp = time(NULL);
     
+    /* ExtraNonce из пула */
+    if (pool->extranonce1_len > 0) {
+        work->extranonce1_len = pool->extranonce1_len;
+        memcpy(work->extranonce1, pool->extranonce1, pool->extranonce1_len);
+    }
+    work->nonce2_len = pool->extranonce2_len > 0 ? pool->extranonce2_len : work->nonce2_len;
+    memset(work->nonce2, 0, sizeof(work->nonce2));
+    
     /* Формируем заголовок блока */
     work_to_header(work);
     
@@ -578,6 +665,16 @@ char *stratum_recv_line(pool_t *pool)
             return line;
         }
     }
+    else if (len == 0) {
+        /* Соединение закрыто пулом */
+        log_message(LOG_WARNING, "%s: Соединение закрыто пулом", TAG);
+        if (pool->sock >= 0) {
+            network_socket_close(pool->sock);
+            pool->sock = -1;
+        }
+        stratum_disconnect(pool);
+        pool->state = POOL_STATE_DEAD;
+    }
     
     return NULL;
 }
@@ -628,6 +725,10 @@ int stratum_parse_response(pool_t *pool, const char *line)
                 parse_mining_notify(pool, params + 1);
             }
         }
+        
+    } else if (strstr(line, "mining.subscribe") || strstr(line, "\"result\":[[[\"mining.notify\"")) {
+        /* Ответ на subscribe содержит extranonce1 и extranonce2_size */
+        parse_subscribe_result(pool, line);
         
     } else if (strstr(line, "mining.set_difficulty")) {
         /* Установка сложности */
