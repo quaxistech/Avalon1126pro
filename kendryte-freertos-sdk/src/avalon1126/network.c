@@ -23,6 +23,11 @@
 #include "network.h"
 #include "cgminer.h"
 #include "mock_hardware.h"
+#include <osdefs.h>
+
+#ifndef DHCP_ADDRESS_ASSIGNED
+#define DHCP_ADDRESS_ASSIGNED 5
+#endif
 
 /* lwIP headers */
 #if !MOCK_NETWORK
@@ -73,9 +78,19 @@ static int s_initialized = 0;
 static struct netif dm9051_netif;
 static handle_t dm9051_handle = 0;
 static SemaphoreHandle_t network_event = NULL;
+static handle_t netif_handle = 0;
 
 /* Задача обработки сетевых пакетов */
 static TaskHandle_t network_task_handle = NULL;
+
+/* API freertos network (C интерфейс из SDK) */
+extern handle_t network_interface_add(handle_t adapter_handle, const ip_address_t *ip_address,
+                                      const ip_address_t *net_mask, const ip_address_t *gateway);
+extern int network_interface_set_enable(handle_t netif_handle, bool enable);
+extern int network_interface_set_as_default(handle_t netif_handle);
+extern int network_interface_dhcp_pooling(handle_t netif_handle);
+extern int network_get_addr(handle_t netif_handle, ip_address_t *ip_address,
+                            ip_address_t *net_mask, ip_address_t *gateway);
 #endif
 
 /* ===========================================================================
@@ -177,8 +192,6 @@ static void network_rx_task(void *pvParameters)
  */
 static int network_init_hardware(void)
 {
-    ip4_addr_t ipaddr, netmask, gw;
-    
     log_message(LOG_INFO, "%s: Инициализация DM9051...", TAG);
     
     /* Создаём семафор для событий */
@@ -217,49 +230,60 @@ static int network_init_hardware(void)
         log_message(LOG_ERR, "%s: Ошибка инициализации DM9051", TAG);
         return -1;
     }
-    
-    /* Настройка IP адреса */
-    if (s_dhcp_enabled || g_config.dhcp_enabled) {
-        IP4_ADDR(&ipaddr, 0, 0, 0, 0);
-        IP4_ADDR(&netmask, 0, 0, 0, 0);
-        IP4_ADDR(&gw, 0, 0, 0, 0);
-    } else {
-        IP4_ADDR(&ipaddr, g_config.ip_addr[0], g_config.ip_addr[1],
-                 g_config.ip_addr[2], g_config.ip_addr[3]);
-        IP4_ADDR(&netmask, g_config.netmask[0], g_config.netmask[1],
-                 g_config.netmask[2], g_config.netmask[3]);
-        IP4_ADDR(&gw, g_config.gateway[0], g_config.gateway[1],
-                 g_config.gateway[2], g_config.gateway[3]);
+
+    ip_address_t ip_cfg = {0};
+    ip_address_t mask_cfg = {0};
+    ip_address_t gw_cfg = {0};
+    if (!s_dhcp_enabled && !g_config.dhcp_enabled) {
+        ip_cfg.data[0] = g_config.ip_addr[0];
+        ip_cfg.data[1] = g_config.ip_addr[1];
+        ip_cfg.data[2] = g_config.ip_addr[2];
+        ip_cfg.data[3] = g_config.ip_addr[3];
+        
+        mask_cfg.data[0] = g_config.netmask[0];
+        mask_cfg.data[1] = g_config.netmask[1];
+        mask_cfg.data[2] = g_config.netmask[2];
+        mask_cfg.data[3] = g_config.netmask[3];
+        
+        gw_cfg.data[0] = g_config.gateway[0];
+        gw_cfg.data[1] = g_config.gateway[1];
+        gw_cfg.data[2] = g_config.gateway[2];
+        gw_cfg.data[3] = g_config.gateway[3];
     }
     
-    /* Добавляем сетевой интерфейс */
-    /* Примечание: для K210 SDK используется другой подход с network adapter */
-    /* Здесь показан концептуальный код */
+    netif_handle = network_interface_add(dm9051_handle, &ip_cfg, &mask_cfg, &gw_cfg);
+    if (!netif_handle) {
+        log_message(LOG_ERR, "%s: Не удалось создать сетевой интерфейс", TAG);
+        return -1;
+    }
     
-    netif_set_status_callback(&dm9051_netif, netif_status_callback);
-    netif_set_default(&dm9051_netif);
-    netif_set_up(&dm9051_netif);
+    network_interface_set_as_default(netif_handle);
+    network_interface_set_enable(netif_handle, true);
     
-    /* Запускаем DHCP если включён */
     if (s_dhcp_enabled || g_config.dhcp_enabled) {
         log_message(LOG_INFO, "%s: Запуск DHCP...", TAG);
-        dhcp_start(&dm9051_netif);
-        
-        /* Ждём получения IP */
-        int timeout = DHCP_TIMEOUT_MS / 100;
-        while (!s_connected && timeout > 0) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            timeout--;
+        int state = network_interface_dhcp_pooling(netif_handle);
+        int retries = 3;
+        while (state != DHCP_ADDRESS_ASSIGNED && retries-- > 0) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            state = network_interface_dhcp_pooling(netif_handle);
         }
-        
-        if (!s_connected) {
-            log_message(LOG_WARNING, "%s: DHCP таймаут", TAG);
+        if (state == DHCP_ADDRESS_ASSIGNED) {
+            ip_address_t ip_get = {0}, mask_get = {0}, gw_get = {0};
+            if (network_get_addr(netif_handle, &ip_get, &mask_get, &gw_get) == 0) {
+                memcpy(s_ip_addr, ip_get.data, 4);
+                memcpy(s_netmask, mask_get.data, 4);
+                memcpy(s_gateway, gw_get.data, 4);
+                s_connected = 1;
+            }
+        } else {
+            log_message(LOG_WARNING, "%s: DHCP не получил адрес (state=%d)", TAG, state);
         }
     } else {
         s_connected = 1;
-        memcpy(s_ip_addr, g_config.ip_addr, 4);
-        memcpy(s_netmask, g_config.netmask, 4);
-        memcpy(s_gateway, g_config.gateway, 4);
+        memcpy(s_ip_addr, ip_cfg.data, 4);
+        memcpy(s_netmask, mask_cfg.data, 4);
+        memcpy(s_gateway, gw_cfg.data, 4);
     }
     
     /* Создаём задачу обработки пакетов */

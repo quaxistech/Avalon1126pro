@@ -263,9 +263,8 @@ int w25qxx_read(uint32_t addr, uint8_t *buf, uint32_t len)
         addr & 0xFF
     };
     
-    /* Отправляем команду и читаем данные */
-    spi_dev_transfer_sequential(spi_device, cmd, 4, NULL, 0);
-    spi_dev_read(spi_device, buf, len);
+    /* Отправляем команду и читаем данные в одной транзакции */
+    spi_dev_transfer_sequential(spi_device, cmd, 4, buf, len);
     
     return 0;
 #endif
