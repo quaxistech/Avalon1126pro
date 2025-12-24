@@ -96,7 +96,7 @@ static const char *state_strings[] = {
  * =========================================================================== */
 
 /**
- * @brief Буфер для отправки пакетов
+ * @brief Буфер для отправки пакетов (40 байт = размер avalon10_pkg_t)
  */
 static uint8_t tx_buffer[AVALON10_PKT_TOTAL_LEN];
 
@@ -184,64 +184,103 @@ static int asic_spi_transfer(int module_id, const uint8_t *tx, uint8_t *rx, size
  * =========================================================================== */
 
 /**
- * @brief Расчёт CRC32 для пакета
+ * @brief Расчёт CRC16-CCITT для пакета
  * 
- * Полином: 0xEDB88320 (стандартный CRC32)
- * Используется для проверки целостности данных при связи с ASIC.
+ * Полином: 0x1021 (CRC-CCITT)
+ * Используется протоколом Avalon для проверки целостности данных.
+ * Таблица и алгоритм соответствуют CGMiner crc16.c
  * 
  * @param data      Указатель на данные
  * @param len       Длина данных
- * @return          Значение CRC32
+ * @return          Значение CRC16
  */
-static uint32_t calc_crc32(const uint8_t *data, size_t len)
+static const uint16_t crc16_table[256] = {
+    0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
+    0x8108, 0x9129, 0xA14A, 0xB16B, 0xC18C, 0xD1AD, 0xE1CE, 0xF1EF,
+    0x1231, 0x0210, 0x3273, 0x2252, 0x52B5, 0x4294, 0x72F7, 0x62D6,
+    0x9339, 0x8318, 0xB37B, 0xA35A, 0xD3BD, 0xC39C, 0xF3FF, 0xE3DE,
+    0x2462, 0x3443, 0x0420, 0x1401, 0x64E6, 0x74C7, 0x44A4, 0x5485,
+    0xA56A, 0xB54B, 0x8528, 0x9509, 0xE5EE, 0xF5CF, 0xC5AC, 0xD58D,
+    0x3653, 0x2672, 0x1611, 0x0630, 0x76D7, 0x66F6, 0x5695, 0x46B4,
+    0xB75B, 0xA77A, 0x9719, 0x8738, 0xF7DF, 0xE7FE, 0xD79D, 0xC7BC,
+    0x48C4, 0x58E5, 0x6886, 0x78A7, 0x0840, 0x1861, 0x2802, 0x3823,
+    0xC9CC, 0xD9ED, 0xE98E, 0xF9AF, 0x8948, 0x9969, 0xA90A, 0xB92B,
+    0x5AF5, 0x4AD4, 0x7AB7, 0x6A96, 0x1A71, 0x0A50, 0x3A33, 0x2A12,
+    0xDBFD, 0xCBDC, 0xFBBF, 0xEB9E, 0x9B79, 0x8B58, 0xBB3B, 0xAB1A,
+    0x6CA6, 0x7C87, 0x4CE4, 0x5CC5, 0x2C22, 0x3C03, 0x0C60, 0x1C41,
+    0xEDAE, 0xFD8F, 0xCDEC, 0xDDCD, 0xAD2A, 0xBD0B, 0x8D68, 0x9D49,
+    0x7E97, 0x6EB6, 0x5ED5, 0x4EF4, 0x3E13, 0x2E32, 0x1E51, 0x0E70,
+    0xFF9F, 0xEFBE, 0xDFDD, 0xCFFC, 0xBF1B, 0xAF3A, 0x9F59, 0x8F78,
+    0x9188, 0x81A9, 0xB1CA, 0xA1EB, 0xD10C, 0xC12D, 0xF14E, 0xE16F,
+    0x1080, 0x00A1, 0x30C2, 0x20E3, 0x5004, 0x4025, 0x7046, 0x6067,
+    0x83B9, 0x9398, 0xA3FB, 0xB3DA, 0xC33D, 0xD31C, 0xE37F, 0xF35E,
+    0x02B1, 0x1290, 0x22F3, 0x32D2, 0x4235, 0x5214, 0x6277, 0x7256,
+    0xB5EA, 0xA5CB, 0x95A8, 0x8589, 0xF56E, 0xE54F, 0xD52C, 0xC50D,
+    0x34E2, 0x24C3, 0x14A0, 0x0481, 0x7466, 0x6447, 0x5424, 0x4405,
+    0xA7DB, 0xB7FA, 0x8799, 0x97B8, 0xE75F, 0xF77E, 0xC71D, 0xD73C,
+    0x26D3, 0x36F2, 0x0691, 0x16B0, 0x6657, 0x7676, 0x4615, 0x5634,
+    0xD94C, 0xC96D, 0xF90E, 0xE92F, 0x99C8, 0x89E9, 0xB98A, 0xA9AB,
+    0x5844, 0x4865, 0x7806, 0x6827, 0x18C0, 0x08E1, 0x3882, 0x28A3,
+    0xCB7D, 0xDB5C, 0xEB3F, 0xFB1E, 0x8BF9, 0x9BD8, 0xABBB, 0xBB9A,
+    0x4A75, 0x5A54, 0x6A37, 0x7A16, 0x0AF1, 0x1AD0, 0x2AB3, 0x3A92,
+    0xFD2E, 0xED0F, 0xDD6C, 0xCD4D, 0xBDAA, 0xAD8B, 0x9DE8, 0x8DC9,
+    0x7C26, 0x6C07, 0x5C64, 0x4C45, 0x3CA2, 0x2C83, 0x1CE0, 0x0CC1,
+    0xEF1F, 0xFF3E, 0xCF5D, 0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8,
+    0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
+};
+
+static uint16_t calc_crc16(const uint8_t *data, size_t len)
 {
-    uint32_t crc = 0xFFFFFFFF;
+    uint16_t crc = 0;
     
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
-        }
+    while (len-- > 0) {
+        crc = crc16_table[((crc >> 8) ^ (*data++)) & 0xFF] ^ (crc << 8);
     }
     
-    return ~crc;
+    return crc;
 }
 
 /**
- * @brief Формирование пакета для отправки на ASIC
+ * @brief Формирование пакета для отправки на ASIC (протокол Avalon4+)
  * 
  * Формат пакета:
- * [0-1]   - Magic (0x4156 "AV")
- * [2]     - Тип команды
- * [3]     - Длина данных
- * [4-N]   - Данные
- * [N-N+4] - CRC32
+ * [0]     - Head1 ('C')
+ * [1]     - Head2 ('N')
+ * [2]     - Type - тип команды
+ * [3]     - Opt - опция
+ * [4]     - Idx - индекс пакета
+ * [5]     - Cnt - количество пакетов
+ * [6-37]  - Data[32]
+ * [38-39] - CRC16-CCITT по data[32]
  * 
  * @param pkg       Указатель на структуру пакета
  * @param type      Тип пакета (AVALON10_P_*)
- * @param data      Указатель на данные
- * @param len       Длина данных
+ * @param idx       Индекс пакета
+ * @param cnt       Количество пакетов
  */
-static void build_pkg(avalon10_pkg_t *pkg, uint8_t type, const uint8_t *data, uint8_t len)
+static void build_pkg(avalon10_pkg_t *pkg, uint8_t type, uint8_t idx, uint8_t cnt)
 {
-    memset(pkg, 0, sizeof(avalon10_pkg_t));
+    uint16_t crc;
     
-    pkg->magic = AVALON10_PKT_MAGIC;
+    pkg->head[0] = AVALON10_PKT_HEAD1;
+    pkg->head[1] = AVALON10_PKT_HEAD2;
     pkg->type = type;
-    pkg->length = len;
+    pkg->opt = 0;
+    pkg->idx = idx;
+    pkg->cnt = cnt;
     
-    if (data && len > 0) {
-        memcpy(pkg->data, data, len);
-    }
+    /* CRC16 вычисляется только по полю data[32] */
+    crc = calc_crc16(pkg->data, AVALON10_PKG_DATA_LEN);
     
-    /* CRC считается по всем данным кроме самого CRC */
-    pkg->crc32 = calc_crc32((uint8_t*)pkg, AVALON10_PKT_TOTAL_LEN - 4);
+    pkg->crc[0] = (crc >> 8) & 0xff;
+    pkg->crc[1] = crc & 0xff;
 }
 
 /**
  * @brief Отправка пакета на модуль
  * 
  * Использует SPI для связи с ASIC или mock функции для тестирования.
+ * Размер пакета фиксирован: 40 байт (AVALON10_PKG_SIZE)
  * 
  * @param module_id ID модуля (0-3)
  * @param pkg       Указатель на пакет
@@ -254,22 +293,17 @@ static int send_pkg(int module_id, const avalon10_pkg_t *pkg)
     }
     
     /* Копируем пакет в буфер передачи */
-    memcpy(tx_buffer, pkg, AVALON10_PKT_TOTAL_LEN);
+    memcpy(tx_buffer, pkg, AVALON10_PKG_SIZE);
     
-#ifdef MOCK_ASIC
+#if MOCK_ASIC
     /* Используем mock функции для тестирования */
-    return mock_asic_send(module_id, tx_buffer, AVALON10_PKT_TOTAL_LEN);
+    return mock_asic_send(module_id, tx_buffer, AVALON10_PKG_SIZE);
 #else
     /* Реальная отправка через SPI */
-    if (!spi_initialized) {
-        asic_spi_init();
-    }
-    
-    asic_select(module_id);
-    spi_send_data_standard(ASIC_SPI_DEVICE, 0, NULL, 0, tx_buffer, AVALON10_PKT_TOTAL_LEN);
-    asic_deselect(module_id);
-    
-    return 0;
+    /* TODO: Реализовать для реального железа */
+    (void)module_id;
+    log_message(LOG_WARNING, "%s: SPI send not implemented", TAG);
+    return -1;
 #endif
 }
 
@@ -283,55 +317,39 @@ static int send_pkg(int module_id, const avalon10_pkg_t *pkg)
  */
 static int recv_pkg(int module_id, avalon10_pkg_t *pkg, int timeout)
 {
+    uint16_t crc_expected, crc_actual;
+    
     if (module_id < 0 || module_id >= AVALON10_DEFAULT_MODULARS) {
         return -1;
     }
     
-#ifdef MOCK_ASIC
+#if MOCK_ASIC
     /* Используем mock функции для тестирования */
-    int ret = mock_asic_recv(module_id, rx_buffer, AVALON10_PKT_TOTAL_LEN, timeout);
+    int ret = mock_asic_recv(module_id, rx_buffer, AVALON10_PKG_SIZE, timeout);
     if (ret < 0) {
         return -1;
     }
-    memcpy(pkg, rx_buffer, AVALON10_PKT_TOTAL_LEN);
+    memcpy(pkg, rx_buffer, AVALON10_PKG_SIZE);
 #else
     /* Реальный приём через SPI */
-    if (!spi_initialized) {
-        asic_spi_init();
-    }
-    
-    TickType_t start = xTaskGetTickCount();
-    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout);
-    
-    while ((xTaskGetTickCount() - start) < timeout_ticks) {
-        asic_select(module_id);
-        spi_receive_data_standard(ASIC_SPI_DEVICE, 0, NULL, 0, rx_buffer, AVALON10_PKT_TOTAL_LEN);
-        asic_deselect(module_id);
-        
-        /* Проверяем magic */
-        avalon10_pkg_t *tmp = (avalon10_pkg_t *)rx_buffer;
-        if (tmp->magic == AVALON10_PKT_MAGIC) {
-            memcpy(pkg, rx_buffer, AVALON10_PKT_TOTAL_LEN);
-            break;
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    
-    if (pkg->magic != AVALON10_PKT_MAGIC) {
-        return -1;
-    }
+    /* TODO: Реализовать для реального железа */
+    (void)timeout;
+    log_message(LOG_WARNING, "%s: SPI recv not implemented", TAG);
+    return -1;
 #endif
     
-    /* Проверяем магическое число */
-    if (pkg->magic != AVALON10_PKT_MAGIC) {
+    /* Проверяем заголовок пакета */
+    if (pkg->head[0] != AVALON10_PKT_HEAD1 || pkg->head[1] != AVALON10_PKT_HEAD2) {
         return -1;
     }
     
-    /* Проверяем CRC */
-    uint32_t crc = calc_crc32((uint8_t*)pkg, AVALON10_PKT_TOTAL_LEN - 4);
-    if (crc != pkg->crc32) {
-        log_message(LOG_WARNING, "%s: CRC error module %d", TAG, module_id);
+    /* Проверяем CRC16 */
+    crc_expected = calc_crc16(pkg->data, AVALON10_PKG_DATA_LEN);
+    crc_actual = ((uint16_t)pkg->crc[0] << 8) | pkg->crc[1];
+    
+    if (crc_expected != crc_actual) {
+        log_message(LOG_WARNING, "%s: CRC16 error module %d (expected %04x, got %04x)", 
+                    TAG, module_id, crc_expected, crc_actual);
         return -1;
     }
     
@@ -359,8 +377,9 @@ static int detect_module(avalon10_info_t *info, int module_id)
     
     log_message(LOG_DEBUG, "%s: Поиск модуля %d...", TAG, module_id);
     
-    /* Отправляем команду обнаружения */
-    build_pkg(&pkg, AVALON10_P_DETECT, NULL, 0);
+    /* Подготавливаем пакет обнаружения */
+    memset(&pkg, 0, sizeof(pkg));
+    build_pkg(&pkg, AVALON10_P_DETECT, 1, 1);
     
     if (send_pkg(module_id, &pkg) < 0) {
         return 0;
@@ -529,7 +548,8 @@ int avalon10_reset(avalon10_info_t *info, int module_id)
         end = module_id + 1;
     }
     
-    build_pkg(&pkg, AVALON10_P_RESET, NULL, 0);
+    memset(&pkg, 0, sizeof(pkg));
+    build_pkg(&pkg, AVALON10_P_RESET, 1, 1);
     
     for (int i = start; i < end; i++) {
         if (info->modules[i].state != AVALON10_MODULE_STATE_NONE) {
@@ -564,7 +584,8 @@ static int poll_module(avalon10_info_t *info, int module_id)
     int nonces = 0;
     
     /* Запрос статуса */
-    build_pkg(&pkg, AVALON10_P_STATUS, NULL, 0);
+    memset(&pkg, 0, sizeof(pkg));
+    build_pkg(&pkg, AVALON10_P_STATUS, 1, 1);
     
     if (send_pkg(module_id, &pkg) < 0) {
         module->poll_errors++;
@@ -579,18 +600,19 @@ static int poll_module(avalon10_info_t *info, int module_id)
     module->poll_errors = 0;
     
     /* Парсинг ответа - обновление температуры */
-    if (pkg.type == AVALON10_P_STATUS && pkg.length >= 8) {
+    if (pkg.type == AVALON10_P_STATUS) {
         module->temp_in = (int16_t)((pkg.data[0] << 8) | pkg.data[1]);
         module->temp_out = (int16_t)((pkg.data[2] << 8) | pkg.data[3]);
     }
     
     /* Проверяем nonce */
-    build_pkg(&pkg, AVALON10_P_NONCE, NULL, 0);
+    memset(&pkg, 0, sizeof(pkg));
+    build_pkg(&pkg, AVALON10_P_NONCE, 1, 1);
     
     if (send_pkg(module_id, &pkg) == 0 &&
         recv_pkg(module_id, &pkg, AVALON10_NONCE_TIMEOUT_MS) == 0) {
         
-        if (pkg.type == AVALON10_P_NONCE && pkg.length >= 4) {
+        if (pkg.type == AVALON10_P_NONCE) {
             /* Найден nonce от ASIC */
             uint32_t nonce = (pkg.data[0] << 24) | (pkg.data[1] << 16) |
                             (pkg.data[2] << 8) | pkg.data[3];
@@ -842,21 +864,15 @@ int avalon10_set_fan_speed(avalon10_info_t *info, int fan_id, int speed)
     if (speed < 0) speed = 0;
     if (speed > 100) speed = 100;
     
-#ifdef MOCK_ASIC
+#if MOCK_ASIC
     /* В режиме эмуляции просто сохраняем значение */
     log_message(LOG_DEBUG, "%s: Вентилятор %d: %d%%", TAG, fan_id, speed);
 #else
     /* Реальная установка PWM */
+    /* TODO: Реализовать для реального железа */
     /* Duty cycle = speed (0-100%) -> PWM (0-1.0) */
-    double duty = speed / 100.0;
-    
-    if (fan_id == 0) {
-        pwm_set_frequency(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_0, FAN_PWM_FREQ, duty);
-        pwm_set_enable(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_0, 1);
-    } else {
-        pwm_set_frequency(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_1, FAN_PWM_FREQ, duty);
-        pwm_set_enable(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_1, 1);
-    }
+    /* double duty = speed / 100.0; */
+    log_message(LOG_DEBUG, "%s: Вентилятор %d: %d%% (PWM not implemented)", TAG, fan_id, speed);
 #endif
     
     info->fan_pwm[fan_id] = speed;
@@ -879,8 +895,8 @@ int avalon10_set_fan_speed(avalon10_info_t *info, int fan_id, int speed)
 int avalon10_set_freq(avalon10_info_t *info, int module_id, int freq)
 {
     avalon10_pkg_t pkg;
-    uint8_t data[4];
     int start, end;
+    uint32_t tmp;
     
     /* Проверка диапазона */
     if (freq < AVALON10_DEFAULT_FREQ_MIN) freq = AVALON10_DEFAULT_FREQ_MIN;
@@ -894,12 +910,15 @@ int avalon10_set_freq(avalon10_info_t *info, int module_id, int freq)
         end = module_id + 1;
     }
     
-    data[0] = (freq >> 8) & 0xFF;
-    data[1] = freq & 0xFF;
-    data[2] = 0;
-    data[3] = 0;
+    /* Подготавливаем пакет */
+    memset(&pkg, 0, sizeof(pkg));
+    tmp = freq;  /* Big-endian формат */
+    pkg.data[0] = (tmp >> 24) & 0xFF;
+    pkg.data[1] = (tmp >> 16) & 0xFF;
+    pkg.data[2] = (tmp >> 8) & 0xFF;
+    pkg.data[3] = tmp & 0xFF;
     
-    build_pkg(&pkg, AVALON10_P_SET_FREQ, data, 4);
+    build_pkg(&pkg, AVALON10_P_SET_FREQ, 1, 1);
     
     for (int i = start; i < end; i++) {
         if (info->modules[i].state != AVALON10_MODULE_STATE_NONE) {
@@ -927,8 +946,8 @@ int avalon10_set_freq(avalon10_info_t *info, int module_id, int freq)
 int avalon10_set_voltage(avalon10_info_t *info, int module_id, int voltage)
 {
     avalon10_pkg_t pkg;
-    uint8_t data[4];
     int start, end;
+    uint32_t tmp;
     
     /* Проверка диапазона */
     if (voltage < AVALON10_VOLTAGE_MIN) voltage = AVALON10_VOLTAGE_MIN;
@@ -942,12 +961,15 @@ int avalon10_set_voltage(avalon10_info_t *info, int module_id, int voltage)
         end = module_id + 1;
     }
     
-    data[0] = (voltage >> 8) & 0xFF;
-    data[1] = voltage & 0xFF;
-    data[2] = 0;
-    data[3] = 0;
+    /* Подготавливаем пакет */
+    memset(&pkg, 0, sizeof(pkg));
+    tmp = voltage;  /* Big-endian формат */
+    pkg.data[0] = (tmp >> 24) & 0xFF;
+    pkg.data[1] = (tmp >> 16) & 0xFF;
+    pkg.data[2] = (tmp >> 8) & 0xFF;
+    pkg.data[3] = tmp & 0xFF;
     
-    build_pkg(&pkg, AVALON10_P_SET_VOLTAGE, data, 4);
+    build_pkg(&pkg, AVALON10_P_SET_VOLTAGE, 1, 1);
     
     for (int i = start; i < end; i++) {
         if (info->modules[i].state != AVALON10_MODULE_STATE_NONE) {
@@ -968,7 +990,9 @@ int avalon10_set_voltage(avalon10_info_t *info, int module_id, int voltage)
 /**
  * @brief Отправка работы на все модули
  * 
- * Формирует пакет с заголовком блока и отправляет на все активные модули.
+ * Формирует пакеты с заголовком блока и отправляет на все активные модули.
+ * Так как заголовок блока = 80 байт, а data в пакете = 32 байта,
+ * заголовок разбивается на 3 пакета (32 + 32 + 16).
  * 
  * @param info      Указатель на структуру информации
  * @param work      Указатель на рабочее задание
@@ -977,16 +1001,31 @@ int avalon10_set_voltage(avalon10_info_t *info, int module_id, int voltage)
 int avalon10_send_work(avalon10_info_t *info, work_t *work)
 {
     avalon10_pkg_t pkg;
+    int pkt_count = 3;  /* 80 байт / 32 = 3 пакета (32+32+16) */
     
     if (!work) {
         return -1;
     }
     
-    /* Формируем пакет с заголовком блока */
-    build_pkg(&pkg, AVALON10_P_WORK, work->header, 80);
-    
     for (int i = 0; i < AVALON10_DEFAULT_MODULARS; i++) {
         if (info->modules[i].state == AVALON10_MODULE_STATE_MINING) {
+            
+            /* Пакет 1: байты 0-31 заголовка */
+            memset(&pkg, 0, sizeof(pkg));
+            memcpy(pkg.data, work->header, 32);
+            build_pkg(&pkg, AVALON10_P_WORK, 1, pkt_count);
+            send_pkg(i, &pkg);
+            
+            /* Пакет 2: байты 32-63 заголовка */
+            memset(&pkg, 0, sizeof(pkg));
+            memcpy(pkg.data, work->header + 32, 32);
+            build_pkg(&pkg, AVALON10_P_WORK, 2, pkt_count);
+            send_pkg(i, &pkg);
+            
+            /* Пакет 3: байты 64-79 заголовка (16 байт) + padding */
+            memset(&pkg, 0, sizeof(pkg));
+            memcpy(pkg.data, work->header + 64, 16);
+            build_pkg(&pkg, AVALON10_P_WORK, 3, pkt_count);
             send_pkg(i, &pkg);
         }
     }

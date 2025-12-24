@@ -53,6 +53,8 @@
 #include "network.h"        /* Сетевой модуль */
 #include "config.h"         /* Конфигурация */
 #include "mock_hardware.h"  /* Эмуляция оборудования */
+#include "auc_uart.h"       /* AUC UART драйвер */
+#include "fpga_loader.h"    /* Загрузчик FPGA bitstream */
 
 /* Kendryte SDK заголовки (только для реального железа) */
 #if !defined(MOCK_HARDWARE)
@@ -411,6 +413,25 @@ static void main_init_hardware(void)
     pwm_set_enable(PWM_DEVICE_0, PWM_CHANNEL_1, 1);
     
 #endif /* MOCK_HARDWARE */
+    
+    /* Инициализация AUC (UART для ASIC) */
+    if (auc_init() != AUC_OK) {
+        log_message(LOG_WARNING, "Не удалось инициализировать AUC");
+    }
+    
+    /* Инициализация и загрузка FPGA */
+    if (fpga_init() == FPGA_OK) {
+        if (fpga_check_bitstream()) {
+            int ret = fpga_load_bitstream();
+            if (ret == FPGA_OK) {
+                log_message(LOG_INFO, "FPGA bitstream загружен успешно");
+            } else {
+                log_message(LOG_WARNING, "Ошибка загрузки FPGA: %s", fpga_error_string(ret));
+            }
+        } else {
+            log_message(LOG_WARNING, "FPGA bitstream не найден во flash");
+        }
+    }
     
     log_message(LOG_INFO, "Оборудование инициализировано");
 }

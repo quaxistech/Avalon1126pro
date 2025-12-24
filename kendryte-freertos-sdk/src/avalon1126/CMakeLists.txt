@@ -7,8 +7,8 @@ cmake_minimum_required(VERSION 3.0)
 # Project name
 project(avalon1126)
 
-# Option for mock/simulation mode
-option(USE_MOCK_HARDWARE "Enable mock hardware for testing" OFF)
+# Option for mock/simulation mode - default ON until real hardware support ready
+option(USE_MOCK_HARDWARE "Enable mock hardware for testing" ON)
 
 # Source files
 set(AVALON1126_SOURCES
@@ -22,6 +22,8 @@ set(AVALON1126_SOURCES
     config.c
     w25qxx.c
     mock_hardware.c
+    auc_uart.c
+    fpga_loader.c
 )
 
 # Header files directory

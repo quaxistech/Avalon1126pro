@@ -197,28 +197,37 @@
 
 /**
  * @brief Базовая длина пакета
- * Минимальный размер пакета: заголовок + команда + данные + CRC
+ * Размер пакета CGMiner Avalon4+ протокола: 40 байт
  * Оригинальный адрес: FUN_ram_8000a1b2 (константа 40)
  */
 #define AVALON10_PKT_BASE_LEN           40
 
 /**
- * @brief Полная длина пакета (с выравниванием)
- * Оригинальное значение из декомпиляции: 72 байта
- * ВАЖНО: увеличено до 96 для поддержки заголовка блока (80 байт)
+ * @brief Полная длина пакета (совпадает с базовой в Avalon протоколе)
  */
-#define AVALON10_PKT_TOTAL_LEN          96
+#define AVALON10_PKT_TOTAL_LEN          40
 
 /**
  * @brief Максимальная длина данных в пакете
+ * В протоколе Avalon - фиксированные 32 байта
  */
-#define AVALON10_PKT_MAX_DATA           (AVALON10_PKT_TOTAL_LEN - 8)
+#define AVALON10_PKT_MAX_DATA           32
 
 /**
- * @brief Сигнатура пакета (magic number)
- * Первые 2 байта каждого пакета = 0x4156 ("AV")
+ * @brief Заголовок пакета - первый байт 'C'
  */
-#define AVALON10_PKT_MAGIC              0x4156
+#define AVALON10_PKT_HEAD1              'C'
+
+/**
+ * @brief Заголовок пакета - второй байт 'N' 
+ */
+#define AVALON10_PKT_HEAD2              'N'
+
+/**
+ * @brief Сигнатура пакета (magic number) - deprecated
+ * Оставлено для совместимости, используйте AVALON10_PKT_HEAD1/HEAD2
+ */
+#define AVALON10_PKT_MAGIC              0x4E43  /* 'CN' little-endian */
 
 /* ---------------------------------------------------------------------------
  * Типы пакетов (команды)
@@ -491,20 +500,32 @@ typedef struct avalon10_info {
  * @struct avalon10_pkg_t
  * @brief Структура пакета для связи с ASIC
  * 
- * Формат пакета:
- * [0-1]   - Magic (0x4156 "AV")
- * [2]     - Тип пакета
- * [3]     - Длина данных
- * [4-67]  - Данные
- * [68-71] - CRC32
+ * Формат пакета (совместим с CGMiner Avalon4+ протоколом):
+ * [0-1]   - Head ('C', 'N' = 0x434E)
+ * [2]     - Type - тип пакета
+ * [3]     - Opt - опция/параметр  
+ * [4]     - Idx - индекс
+ * [5]     - Cnt - счётчик
+ * [6-37]  - Data[32] - данные
+ * [38-39] - CRC16 (CCITT)
+ * 
+ * ВАЖНО: Avalon протокол использует CRC16-CCITT (poly 0x1021), НЕ CRC32!
  */
 typedef struct avalon10_pkg {
-    uint16_t magic;                 /* Сигнатура пакета (0x4156) */
+    uint8_t head[2];                /* Заголовок ('C', 'N') */
     uint8_t type;                   /* Тип пакета (AVALON10_P_*) */
-    uint8_t length;                 /* Длина данных */
-    uint8_t data[AVALON10_PKT_MAX_DATA];  /* Данные */
-    uint32_t crc32;                 /* Контрольная сумма */
+    uint8_t opt;                    /* Опция/параметр */
+    uint8_t idx;                    /* Индекс пакета */
+    uint8_t cnt;                    /* Счётчик пакетов */
+    uint8_t data[32];               /* Данные (32 байта) */
+    uint8_t crc[2];                 /* CRC16-CCITT */
 } __attribute__((packed)) avalon10_pkg_t;
+
+/* Размер пакета */
+#define AVALON10_PKG_SIZE       sizeof(avalon10_pkg_t)  /* 40 байт */
+
+/* Размер данных в пакете */
+#define AVALON10_PKG_DATA_LEN   32
 
 /* ===========================================================================
  * ПРОТОТИПЫ ФУНКЦИЙ

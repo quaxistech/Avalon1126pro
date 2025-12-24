@@ -25,7 +25,7 @@
 #include "mock_hardware.h"
 
 /* lwIP headers */
-#ifndef MOCK_NETWORK
+#if !MOCK_NETWORK
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
@@ -69,7 +69,7 @@ static int s_connected = 0;
 static int s_dhcp_enabled = 1;
 static int s_initialized = 0;
 
-#ifndef MOCK_NETWORK
+#if !MOCK_NETWORK
 static struct netif dm9051_netif;
 static handle_t dm9051_handle = 0;
 static SemaphoreHandle_t network_event = NULL;
@@ -370,7 +370,7 @@ int network_set_static_ip(const uint8_t *ip, const uint8_t *mask, const uint8_t 
     memcpy(s_netmask, mask, 4);
     memcpy(s_gateway, gw, 4);
     
-#ifndef MOCK_NETWORK
+#if !MOCK_NETWORK
     if (s_initialized) {
         ip4_addr_t ipaddr, netmask, gateway;
         IP4_ADDR(&ipaddr, ip[0], ip[1], ip[2], ip[3]);
@@ -397,7 +397,7 @@ int network_enable_dhcp(void)
 {
     s_dhcp_enabled = 1;
     
-#ifndef MOCK_NETWORK
+#if !MOCK_NETWORK
     if (s_initialized) {
         dhcp_start(&dm9051_netif);
     }

@@ -159,15 +159,15 @@
  * Используются для возврата состояния из функций.
  * =========================================================================== */
 
-#define ERR_OK              0   /* Успешно */
-#define ERR_FAIL           -1   /* Общая ошибка */
-#define ERR_TIMEOUT        -2   /* Таймаут */
-#define ERR_MEMORY         -3   /* Ошибка памяти */
-#define ERR_NETWORK        -4   /* Сетевая ошибка */
-#define ERR_INVALID        -5   /* Неверные данные */
-#define ERR_NOTFOUND       -6   /* Не найдено */
-#define ERR_BUSY           -7   /* Занято */
-#define ERR_DISCONNECTED   -8   /* Отключено */
+#define CGMINER_OK          0   /* Успешно */
+#define CGMINER_FAIL       -1   /* Общая ошибка */
+#define CGMINER_TIMEOUT    -2   /* Таймаут */
+#define CGMINER_MEMORY     -3   /* Ошибка памяти */
+#define CGMINER_NETWORK    -4   /* Сетевая ошибка */
+#define CGMINER_INVALID    -5   /* Неверные данные */
+#define CGMINER_NOTFOUND   -6   /* Не найдено */
+#define CGMINER_BUSY       -7   /* Занято */
+#define CGMINER_DISCONN    -8   /* Отключено */
 
 /* ===========================================================================
  * МАКРОСЫ УТИЛИТ
