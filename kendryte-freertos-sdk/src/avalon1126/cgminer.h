@@ -310,6 +310,8 @@ typedef struct work {
     /* ------------------------------------------
      * ExtraNonce
      * ------------------------------------------ */
+    uint8_t extranonce1[16];                /* ExtraNonce1 от пула */
+    int extranonce1_len;                    /* Длина ExtraNonce1 */
     uint8_t nonce2[8];                      /* ExtraNonce2 */
     int nonce2_len;                         /* Длина ExtraNonce2 */
     uint32_t nonce;                         /* Найденный nonce */

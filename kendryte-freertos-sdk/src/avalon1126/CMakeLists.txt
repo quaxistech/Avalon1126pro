@@ -7,6 +7,9 @@ cmake_minimum_required(VERSION 3.0)
 # Project name
 project(avalon1126)
 
+# Option for mock/simulation mode
+option(USE_MOCK_HARDWARE "Enable mock hardware for testing" OFF)
+
 # Source files
 set(AVALON1126_SOURCES
     main.c
@@ -18,6 +21,7 @@ set(AVALON1126_SOURCES
     work.c
     config.c
     w25qxx.c
+    mock_hardware.c
 )
 
 # Header files directory
@@ -51,3 +55,14 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     CGMINER_VERSION="4.11.1"
     AVALON10_DRIVER=1
 )
+
+# Mock hardware definitions
+if(USE_MOCK_HARDWARE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        MOCK_HARDWARE=1
+        MOCK_SPI_FLASH=1
+        MOCK_NETWORK=1
+        MOCK_ASIC=1
+    )
+    message(STATUS "Building with mock hardware support")
+endif()

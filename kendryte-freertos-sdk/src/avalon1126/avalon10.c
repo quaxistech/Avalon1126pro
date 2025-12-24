@@ -36,6 +36,18 @@
 
 #include "avalon10.h"
 #include "cgminer.h"
+#include "pool.h"
+#include "work.h"
+#include "stratum.h"
+#include "mock_hardware.h"
+
+/* SDK заголовки для SPI */
+#ifndef MOCK_ASIC
+#include <spi.h>
+#include <fpioa.h>
+#include <gpiohs.h>
+#include <pwm.h>
+#endif
 
 /* ===========================================================================
  * ЛОКАЛЬНЫЕ КОНСТАНТЫ
@@ -61,6 +73,25 @@ static const char *state_strings[] = {
 };
 
 /* ===========================================================================
+ * КОНФИГУРАЦИЯ SPI ДЛЯ ASIC
+ * =========================================================================== */
+
+#ifndef MOCK_ASIC
+/* SPI устройство для ASIC */
+#define ASIC_SPI_DEVICE     SPI_DEVICE_0
+#define ASIC_SPI_CLK_RATE   10000000   /* 10 MHz */
+
+/* GPIO для выбора модулей (CS lines) */
+#define ASIC_CS_PIN_BASE    20  /* GPIO20-23 для 4 модулей */
+
+/* PWM для вентиляторов */
+#define FAN_PWM_DEVICE      PWM_DEVICE_0
+#define FAN_PWM_CHANNEL_0   PWM_CHANNEL_0
+#define FAN_PWM_CHANNEL_1   PWM_CHANNEL_1
+#define FAN_PWM_FREQ        25000   /* 25 kHz */
+#endif
+
+/* ===========================================================================
  * ЛОКАЛЬНЫЕ ПЕРЕМЕННЫЕ
  * =========================================================================== */
 
@@ -73,6 +104,80 @@ static uint8_t tx_buffer[AVALON10_PKT_TOTAL_LEN];
  * @brief Буфер для приёма пакетов
  */
 static uint8_t rx_buffer[AVALON10_PKT_TOTAL_LEN];
+
+/* ===========================================================================
+ * НИЗКОУРОВНЕВЫЕ SPI ФУНКЦИИ
+ * =========================================================================== */
+
+#ifndef MOCK_ASIC
+/**
+ * @brief Флаг инициализации SPI (только для реального железа)
+ */
+static int spi_initialized = 0;
+/**
+ * @brief Инициализация SPI для связи с ASIC
+ */
+static int asic_spi_init(void)
+{
+    if (spi_initialized) return 0;
+    
+    /* Настройка FPIOA для SPI */
+    fpioa_set_function(ASIC_SPI_CLK_PIN, FUNC_SPI0_SCLK);
+    fpioa_set_function(ASIC_SPI_MOSI_PIN, FUNC_SPI0_D0);
+    fpioa_set_function(ASIC_SPI_MISO_PIN, FUNC_SPI0_D1);
+    
+    /* Настройка GPIO для CS */
+    for (int i = 0; i < AVALON10_DEFAULT_MODULARS; i++) {
+        gpiohs_set_drive_mode(ASIC_CS_PIN_BASE + i, GPIO_DM_OUTPUT);
+        gpiohs_set_pin(ASIC_CS_PIN_BASE + i, GPIO_PV_HIGH);  /* CS high (deselect) */
+    }
+    
+    /* Инициализация SPI */
+    spi_init(ASIC_SPI_DEVICE, SPI_WORK_MODE_0, SPI_FF_STANDARD, 8, 0);
+    spi_set_clk_rate(ASIC_SPI_DEVICE, ASIC_SPI_CLK_RATE);
+    
+    spi_initialized = 1;
+    log_message(LOG_INFO, "%s: SPI инициализирован @ %d MHz", TAG, ASIC_SPI_CLK_RATE / 1000000);
+    
+    return 0;
+}
+
+/**
+ * @brief Выбор модуля (CS low)
+ */
+static void asic_select(int module_id)
+{
+    if (module_id >= 0 && module_id < AVALON10_DEFAULT_MODULARS) {
+        gpiohs_set_pin(ASIC_CS_PIN_BASE + module_id, GPIO_PV_LOW);
+    }
+}
+
+/**
+ * @brief Снятие выбора модуля (CS high)
+ */
+static void asic_deselect(int module_id)
+{
+    if (module_id >= 0 && module_id < AVALON10_DEFAULT_MODULARS) {
+        gpiohs_set_pin(ASIC_CS_PIN_BASE + module_id, GPIO_PV_HIGH);
+    }
+}
+
+/**
+ * @brief SPI передача данных
+ */
+static int asic_spi_transfer(int module_id, const uint8_t *tx, uint8_t *rx, size_t len)
+{
+    asic_select(module_id);
+    
+    /* Full-duplex SPI transfer */
+    spi_send_data_standard(ASIC_SPI_DEVICE, 0, NULL, 0, tx, len);
+    spi_receive_data_standard(ASIC_SPI_DEVICE, 0, NULL, 0, rx, len);
+    
+    asic_deselect(module_id);
+    
+    return 0;
+}
+#endif /* !MOCK_ASIC */
 
 /* ===========================================================================
  * ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -136,7 +241,7 @@ static void build_pkg(avalon10_pkg_t *pkg, uint8_t type, const uint8_t *data, ui
 /**
  * @brief Отправка пакета на модуль
  * 
- * Использует SPI для связи с ASIC.
+ * Использует SPI для связи с ASIC или mock функции для тестирования.
  * 
  * @param module_id ID модуля (0-3)
  * @param pkg       Указатель на пакет
@@ -144,16 +249,28 @@ static void build_pkg(avalon10_pkg_t *pkg, uint8_t type, const uint8_t *data, ui
  */
 static int send_pkg(int module_id, const avalon10_pkg_t *pkg)
 {
+    if (module_id < 0 || module_id >= AVALON10_DEFAULT_MODULARS) {
+        return -1;
+    }
+    
     /* Копируем пакет в буфер передачи */
     memcpy(tx_buffer, pkg, AVALON10_PKT_TOTAL_LEN);
     
-    /* TODO: Реальная отправка через SPI
-     * spi_select(module_id);
-     * spi_transfer(tx_buffer, rx_buffer, AVALON10_PKT_TOTAL_LEN);
-     * spi_deselect(module_id);
-     */
+#ifdef MOCK_ASIC
+    /* Используем mock функции для тестирования */
+    return mock_asic_send(module_id, tx_buffer, AVALON10_PKT_TOTAL_LEN);
+#else
+    /* Реальная отправка через SPI */
+    if (!spi_initialized) {
+        asic_spi_init();
+    }
+    
+    asic_select(module_id);
+    spi_send_data_standard(ASIC_SPI_DEVICE, 0, NULL, 0, tx_buffer, AVALON10_PKT_TOTAL_LEN);
+    asic_deselect(module_id);
     
     return 0;
+#endif
 }
 
 /**
@@ -166,7 +283,45 @@ static int send_pkg(int module_id, const avalon10_pkg_t *pkg)
  */
 static int recv_pkg(int module_id, avalon10_pkg_t *pkg, int timeout)
 {
-    /* TODO: Реальный приём через SPI */
+    if (module_id < 0 || module_id >= AVALON10_DEFAULT_MODULARS) {
+        return -1;
+    }
+    
+#ifdef MOCK_ASIC
+    /* Используем mock функции для тестирования */
+    int ret = mock_asic_recv(module_id, rx_buffer, AVALON10_PKT_TOTAL_LEN, timeout);
+    if (ret < 0) {
+        return -1;
+    }
+    memcpy(pkg, rx_buffer, AVALON10_PKT_TOTAL_LEN);
+#else
+    /* Реальный приём через SPI */
+    if (!spi_initialized) {
+        asic_spi_init();
+    }
+    
+    TickType_t start = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout);
+    
+    while ((xTaskGetTickCount() - start) < timeout_ticks) {
+        asic_select(module_id);
+        spi_receive_data_standard(ASIC_SPI_DEVICE, 0, NULL, 0, rx_buffer, AVALON10_PKT_TOTAL_LEN);
+        asic_deselect(module_id);
+        
+        /* Проверяем magic */
+        avalon10_pkg_t *tmp = (avalon10_pkg_t *)rx_buffer;
+        if (tmp->magic == AVALON10_PKT_MAGIC) {
+            memcpy(pkg, rx_buffer, AVALON10_PKT_TOTAL_LEN);
+            break;
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    
+    if (pkg->magic != AVALON10_PKT_MAGIC) {
+        return -1;
+    }
+#endif
     
     /* Проверяем магическое число */
     if (pkg->magic != AVALON10_PKT_MAGIC) {
@@ -436,13 +591,41 @@ static int poll_module(avalon10_info_t *info, int module_id)
         recv_pkg(module_id, &pkg, AVALON10_NONCE_TIMEOUT_MS) == 0) {
         
         if (pkg.type == AVALON10_P_NONCE && pkg.length >= 4) {
-            /* Найден nonce */
+            /* Найден nonce от ASIC */
             uint32_t nonce = (pkg.data[0] << 24) | (pkg.data[1] << 16) |
                             (pkg.data[2] << 8) | pkg.data[3];
             
-            /* TODO: Проверка и отправка на пул */
+            /* Получаем текущую работу через stratum модуль */
+            work_t *current_work = stratum_get_current_work();
+            
+            if (current_work && g_work_mutex) {
+                if (xSemaphoreTake(g_work_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    /* Проверяем nonce через SHA256d */
+                    if (work_check_nonce(current_work, nonce)) {
+                        /* Nonce валиден - отправляем на пул */
+                        current_work->nonce = nonce;
+                        
+                        /* Вызываем отправку через stratum */
+                        if (g_current_pool && g_current_pool->stratum_active) {
+                            if (stratum_submit_nonce(g_current_pool, current_work) == 0) {
+                                module->accepted++;
+                                log_message(LOG_INFO, "%s: Nonce 0x%08X отправлен на пул", 
+                                           TAG, nonce);
+                            } else {
+                                log_message(LOG_WARNING, "%s: Ошибка отправки nonce", TAG);
+                            }
+                        }
+                    } else {
+                        /* Hardware error - nonce не прошёл проверку */
+                        module->hw_errors++;
+                        info->total_hw_errors++;
+                        log_message(LOG_WARNING, "%s: HW Error: nonce 0x%08X не валиден", 
+                                   TAG, nonce);
+                    }
+                    xSemaphoreGive(g_work_mutex);
+                }
+            }
             nonces++;
-            module->accepted++;
         }
     }
     
@@ -659,9 +842,22 @@ int avalon10_set_fan_speed(avalon10_info_t *info, int fan_id, int speed)
     if (speed < 0) speed = 0;
     if (speed > 100) speed = 100;
     
-    /* TODO: Реальная установка PWM
-     * pwm_set_duty(fan_id, speed);
-     */
+#ifdef MOCK_ASIC
+    /* В режиме эмуляции просто сохраняем значение */
+    log_message(LOG_DEBUG, "%s: Вентилятор %d: %d%%", TAG, fan_id, speed);
+#else
+    /* Реальная установка PWM */
+    /* Duty cycle = speed (0-100%) -> PWM (0-1.0) */
+    double duty = speed / 100.0;
+    
+    if (fan_id == 0) {
+        pwm_set_frequency(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_0, FAN_PWM_FREQ, duty);
+        pwm_set_enable(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_0, 1);
+    } else {
+        pwm_set_frequency(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_1, FAN_PWM_FREQ, duty);
+        pwm_set_enable(FAN_PWM_DEVICE, FAN_PWM_CHANNEL_1, 1);
+    }
+#endif
     
     info->fan_pwm[fan_id] = speed;
     
@@ -813,11 +1009,39 @@ int avalon10_send_work(avalon10_info_t *info, work_t *work)
  */
 int avalon10_check_nonce(work_t *work, uint32_t nonce)
 {
-    /* TODO: Реальная проверка SHA256d */
-    /* 1. Вставить nonce в заголовок (позиция 76-79) */
-    /* 2. Вычислить SHA256(SHA256(header)) */
-    /* 3. Сравнить с target */
+    if (!work) return 0;
     
+    uint8_t header[80];
+    uint8_t hash[32];
+    
+    /* 1. Копируем заголовок блока */
+    memcpy(header, work->header, 80);
+    
+    /* 2. Вставляем nonce в позицию 76-79 (little-endian) */
+    header[76] = nonce & 0xFF;
+    header[77] = (nonce >> 8) & 0xFF;
+    header[78] = (nonce >> 16) & 0xFF;
+    header[79] = (nonce >> 24) & 0xFF;
+    
+    /* 3. Вычисляем SHA256d (двойной SHA256) */
+    extern void mock_sha256d(const uint8_t *data, size_t len, uint8_t *hash);
+    mock_sha256d(header, 80, hash);
+    
+    /* 4. Сравниваем с target (hash должен быть меньше target)
+     * Bitcoin хэши сравниваются как big-endian числа,
+     * поэтому сравниваем байты с конца (старшие байты первые) */
+    for (int i = 31; i >= 0; i--) {
+        if (hash[i] < work->target[i]) {
+            /* hash < target - nonce валиден! */
+            return 1;
+        } else if (hash[i] > work->target[i]) {
+            /* hash > target - nonce не подходит */
+            return 0;
+        }
+        /* hash[i] == target[i] - продолжаем сравнение */
+    }
+    
+    /* hash == target - валиден (крайне редкий случай) */
     return 1;
 }
 

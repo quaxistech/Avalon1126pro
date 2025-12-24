@@ -17,3 +17,15 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     API_VERSION="3.7"
     AVALON10_DRIVER=1
 )
+
+# Mock hardware definitions (for testing without real hardware)
+# Set USE_MOCK_HARDWARE=ON in cmake to enable
+if(USE_MOCK_HARDWARE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        MOCK_HARDWARE=1
+        MOCK_SPI_FLASH=1
+        MOCK_NETWORK=1
+        MOCK_ASIC=1
+    )
+    message(STATUS "avalon1126: Building with mock hardware support")
+endif()

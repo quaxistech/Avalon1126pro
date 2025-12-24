@@ -24,9 +24,15 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <FreeRTOS.h>
+#include <task.h>
+
 #include "stratum.h"
 #include "pool.h"
 #include "cgminer.h"
+#include "network.h"
+#include "work.h"
+#include "mock_hardware.h"
 
 /* ===========================================================================
  * ЛОКАЛЬНЫЕ КОНСТАНТЫ
@@ -34,18 +40,26 @@
 
 static const char *TAG = "Stratum";
 
+#define STRATUM_RECV_BUFSIZE    4096
+#define STRATUM_LINE_BUFSIZE    2048
+
 /* ===========================================================================
- * ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+ * ЛОКАЛЬНЫЕ ПЕРЕМЕННЫЕ
+ * =========================================================================== */
+
+/* Буфер приёма для накопления неполных строк */
+static char recv_buffer[STRATUM_RECV_BUFSIZE];
+static int recv_buffer_len = 0;
+
+/* Текущая работа, полученная от пула */
+static work_t *current_work = NULL;
+
+/* ===========================================================================
+ * ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПАРСИНГА JSON
  * =========================================================================== */
 
 /**
- * @brief Простой парсер JSON - получение значения по ключу
- * 
- * @param json  JSON строка
- * @param key   Ключ для поиска
- * @param buf   Буфер для результата
- * @param len   Размер буфера
- * @return      0 при успехе
+ * @brief Простой парсер JSON - получение строкового значения по ключу
  */
 static int json_get_string(const char *json, const char *key, char *buf, int len)
 {
@@ -64,8 +78,11 @@ static int json_get_string(const char *json, const char *key, char *buf, int len
     start = strchr(start, ':');
     if (!start) return -1;
     
-    start = strchr(start, '"');
-    if (!start) return -1;
+    /* Пропускаем пробелы */
+    start++;
+    while (*start == ' ' || *start == '\t') start++;
+    
+    if (*start != '"') return -1;
     start++;
     
     end = strchr(start, '"');
@@ -78,6 +95,322 @@ static int json_get_string(const char *json, const char *key, char *buf, int len
     buf[vlen] = '\0';
     
     return 0;
+}
+
+/**
+ * @brief Парсинг числового значения
+ */
+static int json_get_int(const char *json, const char *key, int *value)
+{
+    char search[64];
+    const char *start;
+    
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    start = strstr(json, search);
+    if (!start) return -1;
+    
+    start = strchr(start, ':');
+    if (!start) return -1;
+    start++;
+    
+    while (*start == ' ' || *start == '\t') start++;
+    
+    *value = atoi(start);
+    return 0;
+}
+
+/**
+ * @brief Парсинг значения с плавающей точкой
+ */
+static int json_get_double(const char *json, const char *key, double *value)
+{
+    char search[64];
+    const char *start;
+    
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    start = strstr(json, search);
+    if (!start) return -1;
+    
+    start = strchr(start, ':');
+    if (!start) return -1;
+    start++;
+    
+    while (*start == ' ' || *start == '\t') start++;
+    
+    *value = atof(start);
+    return 0;
+}
+
+/**
+ * @brief Парсинг boolean значения
+ */
+static int json_get_bool(const char *json, const char *key, int *value)
+{
+    char search[64];
+    const char *start;
+    
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    start = strstr(json, search);
+    if (!start) return -1;
+    
+    start = strchr(start, ':');
+    if (!start) return -1;
+    start++;
+    
+    while (*start == ' ' || *start == '\t') start++;
+    
+    if (strncmp(start, "true", 4) == 0) {
+        *value = 1;
+    } else if (strncmp(start, "false", 5) == 0) {
+        *value = 0;
+    } else {
+        return -1;
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief Преобразование hex-строки в байты
+ */
+static int hex_decode(const char *hex, uint8_t *out, size_t max_len)
+{
+    size_t hex_len = strlen(hex);
+    size_t byte_len = hex_len / 2;
+    
+    if (byte_len > max_len) byte_len = max_len;
+    
+    for (size_t i = 0; i < byte_len; i++) {
+        unsigned int b;
+        if (sscanf(hex + i * 2, "%2x", &b) != 1) {
+            return -1;
+        }
+        out[i] = (uint8_t)b;
+    }
+    
+    return (int)byte_len;
+}
+
+/**
+ * @brief Преобразование байт в hex-строку
+ */
+static void hex_encode(const uint8_t *data, size_t len, char *out)
+{
+    for (size_t i = 0; i < len; i++) {
+        sprintf(out + i * 2, "%02x", data[i]);
+    }
+    out[len * 2] = '\0';
+}
+
+/* ===========================================================================
+ * ПАРСИНГ MINING.NOTIFY
+ * =========================================================================== */
+
+/**
+ * @brief Парсинг mining.notify сообщения
+ * 
+ * Формат params:
+ * [0] job_id - строка идентификатора задания
+ * [1] prevhash - 32 байта в hex (64 символа)
+ * [2] coinbase1 - первая часть coinbase транзакции
+ * [3] coinbase2 - вторая часть coinbase транзакции
+ * [4] merkle_branch - массив хэшей для построения merkle root
+ * [5] version - версия блока (hex)
+ * [6] nbits - сложность в компактной форме (hex)
+ * [7] ntime - временная метка (hex)
+ * [8] clean_jobs - если true, отменить предыдущие работы
+ */
+static int parse_mining_notify(pool_t *pool, const char *params)
+{
+    work_t *work;
+    const char *ptr = params;
+    char buf[256];
+    int i;
+    
+    /* Создаём новую работу */
+    work = create_work();
+    if (!work) {
+        log_message(LOG_ERR, "%s: Не удалось создать work", TAG);
+        return -1;
+    }
+    
+    work->pool_no = pool->pool_no;
+    
+    /* Ищем начало массива params */
+    ptr = strchr(ptr, '[');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    /* [0] job_id */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    i = 0;
+    while (*ptr && *ptr != '"' && i < MAX_JOB_ID_LEN - 1) {
+        work->job_id[i++] = *ptr++;
+    }
+    work->job_id[i] = '\0';
+    
+    if (*ptr != '"') goto parse_error;
+    ptr++;
+    
+    /* [1] prevhash */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    memset(buf, 0, sizeof(buf));
+    i = 0;
+    while (*ptr && *ptr != '"' && i < 64) {
+        buf[i++] = *ptr++;
+    }
+    buf[i] = '\0';
+    
+    if (i != 64) {
+        log_message(LOG_WARNING, "%s: Неверная длина prevhash: %d", TAG, i);
+    }
+    
+    hex_decode(buf, work->prevhash, 32);
+    
+    if (*ptr != '"') goto parse_error;
+    ptr++;
+    
+    /* [2] coinbase1 */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    i = 0;
+    while (*ptr && *ptr != '"' && i < sizeof(buf) - 1) {
+        buf[i++] = *ptr++;
+    }
+    buf[i] = '\0';
+    
+    work->coinbase1_len = hex_decode(buf, work->coinbase1, sizeof(work->coinbase1));
+    
+    if (*ptr != '"') goto parse_error;
+    ptr++;
+    
+    /* [3] coinbase2 */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    i = 0;
+    while (*ptr && *ptr != '"' && i < sizeof(buf) - 1) {
+        buf[i++] = *ptr++;
+    }
+    buf[i] = '\0';
+    
+    work->coinbase2_len = hex_decode(buf, work->coinbase2, sizeof(work->coinbase2));
+    
+    if (*ptr != '"') goto parse_error;
+    ptr++;
+    
+    /* [4] merkle_branch - массив */
+    ptr = strchr(ptr, '[');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    work->merkle_count = 0;
+    while (*ptr && *ptr != ']' && work->merkle_count < 16) {
+        if (*ptr == '"') {
+            ptr++;
+            i = 0;
+            while (*ptr && *ptr != '"' && i < 64) {
+                buf[i++] = *ptr++;
+            }
+            buf[i] = '\0';
+            
+            if (i == 64) {
+                hex_decode(buf, work->merkle_branch[work->merkle_count], 32);
+                work->merkle_count++;
+            }
+            
+            if (*ptr == '"') ptr++;
+        } else {
+            ptr++;
+        }
+    }
+    
+    if (*ptr == ']') ptr++;
+    
+    /* [5] version */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    i = 0;
+    while (*ptr && *ptr != '"' && i < 8) {
+        buf[i++] = *ptr++;
+    }
+    buf[i] = '\0';
+    
+    work->version = (uint32_t)strtoul(buf, NULL, 16);
+    
+    if (*ptr != '"') goto parse_error;
+    ptr++;
+    
+    /* [6] nbits */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    i = 0;
+    while (*ptr && *ptr != '"' && i < 8) {
+        buf[i++] = *ptr++;
+    }
+    buf[i] = '\0';
+    
+    work->nbits = (uint32_t)strtoul(buf, NULL, 16);
+    
+    if (*ptr != '"') goto parse_error;
+    ptr++;
+    
+    /* [7] ntime */
+    ptr = strchr(ptr, '"');
+    if (!ptr) goto parse_error;
+    ptr++;
+    
+    i = 0;
+    while (*ptr && *ptr != '"' && i < 8) {
+        buf[i++] = *ptr++;
+    }
+    buf[i] = '\0';
+    
+    work->ntime = (uint32_t)strtoul(buf, NULL, 16);
+    
+    /* [8] clean_jobs (опционально) */
+    int clean = 0;
+    if (strstr(ptr, "true")) {
+        clean = 1;
+    }
+    
+    work->timestamp = time(NULL);
+    
+    /* Формируем заголовок блока */
+    work_to_header(work);
+    
+    /* Сохраняем как текущую работу */
+    if (current_work) {
+        current_work->stale = 1;
+        free_work(current_work);
+    }
+    current_work = work;
+    
+    log_message(LOG_INFO, "%s: Новое задание: job=%s, merkle=%d, clean=%d", 
+               TAG, work->job_id, work->merkle_count, clean);
+    
+    pool->getworks++;
+    pool->last_work_time = time(NULL);
+    
+    return 0;
+    
+parse_error:
+    log_message(LOG_ERR, "%s: Ошибка парсинга mining.notify", TAG);
+    free_work(work);
+    return -1;
 }
 
 /* ===========================================================================
@@ -94,6 +427,9 @@ int stratum_connect(pool_t *pool)
     log_message(LOG_INFO, "%s: Stratum подключение к %s:%d", 
                TAG, pool->host, pool->port);
     
+    /* Сбрасываем буфер приёма */
+    recv_buffer_len = 0;
+    
     /* Подключение к TCP сокету уже выполнено в connect_pool() */
     
     /* Отправляем mining.subscribe */
@@ -102,11 +438,19 @@ int stratum_connect(pool_t *pool)
         return -1;
     }
     
+    /* Ждём ответ на subscribe */
+    vTaskDelay(pdMS_TO_TICKS(500));
+    stratum_process_responses(pool);
+    
     /* Отправляем mining.authorize */
     if (stratum_authorize(pool) < 0) {
         log_message(LOG_ERR, "%s: Ошибка authorize", TAG);
         return -1;
     }
+    
+    /* Ждём ответ на authorize */
+    vTaskDelay(pdMS_TO_TICKS(500));
+    stratum_process_responses(pool);
     
     pool->stratum_active = 1;
     pool->state = POOL_STATE_ACTIVE;
@@ -125,6 +469,8 @@ void stratum_disconnect(pool_t *pool)
         pool->stratum_active = 0;
         pool->stratum_auth = 0;
     }
+    
+    recv_buffer_len = 0;
 }
 
 /**
@@ -171,6 +517,9 @@ int stratum_authorize(pool_t *pool)
 
 /**
  * @brief Чтение строки от пула
+ * 
+ * Читает данные из сокета и возвращает полную строку (до \n).
+ * Неполные строки накапливаются в буфере.
  */
 char *stratum_recv_line(pool_t *pool)
 {
@@ -178,10 +527,57 @@ char *stratum_recv_line(pool_t *pool)
         return NULL;
     }
     
-    /* TODO: Реальное чтение из сокета
-     * char *line = malloc(STRATUM_MAX_MSG);
-     * int len = recv(pool->sock, line, STRATUM_MAX_MSG - 1, 0);
-     */
+    /* Проверяем, есть ли уже полная строка в буфере */
+    char *newline = strchr(recv_buffer, '\n');
+    if (newline) {
+        /* Извлекаем строку */
+        int line_len = newline - recv_buffer + 1;
+        char *line = (char *)malloc(line_len + 1);
+        if (!line) return NULL;
+        
+        memcpy(line, recv_buffer, line_len);
+        line[line_len] = '\0';
+        
+        /* Сдвигаем оставшиеся данные */
+        recv_buffer_len -= line_len;
+        memmove(recv_buffer, newline + 1, recv_buffer_len);
+        recv_buffer[recv_buffer_len] = '\0';
+        
+        return line;
+    }
+    
+    /* Читаем новые данные */
+    int space = sizeof(recv_buffer) - recv_buffer_len - 1;
+    if (space <= 0) {
+        /* Буфер переполнен, сбрасываем */
+        recv_buffer_len = 0;
+        recv_buffer[0] = '\0';
+        return NULL;
+    }
+    
+    int len = network_socket_recv(pool->sock, recv_buffer + recv_buffer_len, space, 100);
+    
+    if (len > 0) {
+        recv_buffer_len += len;
+        recv_buffer[recv_buffer_len] = '\0';
+        
+        /* Проверяем на полную строку */
+        newline = strchr(recv_buffer, '\n');
+        if (newline) {
+            int line_len = newline - recv_buffer + 1;
+            char *line = (char *)malloc(line_len + 1);
+            if (!line) return NULL;
+            
+            memcpy(line, recv_buffer, line_len);
+            line[line_len] = '\0';
+            
+            recv_buffer_len -= line_len;
+            memmove(recv_buffer, newline + 1, recv_buffer_len);
+            recv_buffer[recv_buffer_len] = '\0';
+            
+            return line;
+        }
+    }
     
     return NULL;
 }
@@ -195,66 +591,163 @@ int stratum_send_line(pool_t *pool, const char *str)
         return -1;
     }
     
-    /* TODO: Реальная отправка в сокет
-     * return send(pool->sock, str, strlen(str), 0);
-     */
+    size_t len = strlen(str);
+    int sent = network_socket_send(pool->sock, str, len);
     
-    return 0;
-}
-
-/**
- * @brief Парсинг JSON ответа от пула
- * 
- * Обрабатывает:
- * - mining.notify - новое задание
- * - mining.set_difficulty - установка сложности
- * - result - ответ на запрос
- */
-int stratum_parse_response(pool_t *pool, const char *line)
-{
-    if (!pool || !line) return -1;
-    
-    log_message(LOG_DEBUG, "%s: <- %s", TAG, line);
-    
-    /* Проверяем тип сообщения */
-    if (strstr(line, "mining.notify")) {
-        /* Новое задание от пула */
-        log_message(LOG_INFO, "%s: Новое задание", TAG);
-        
-        /* TODO: Парсинг job_id, prevhash, coinbase1, coinbase2, merkle_branch, version, nbits, ntime */
-        
-        pool->getworks++;
-        pool->last_work_time = time(NULL);
-        
-    } else if (strstr(line, "mining.set_difficulty")) {
-        /* Установка сложности */
-        char diff_str[32];
-        if (json_get_string(line, "params", diff_str, sizeof(diff_str)) == 0) {
-            pool->sdiff = atof(diff_str);
-            log_message(LOG_INFO, "%s: Сложность: %.2f", TAG, pool->sdiff);
-        }
-        
-    } else if (strstr(line, "\"result\":true")) {
-        /* Шара принята */
-        pool->accepted++;
-        log_message(LOG_INFO, "%s: Шара принята! Всего: %llu", 
-                   TAG, (unsigned long long)pool->accepted);
-        
-    } else if (strstr(line, "\"result\":false") || strstr(line, "\"error\":")) {
-        /* Шара отклонена */
-        pool->rejected++;
-        log_message(LOG_WARNING, "%s: Шара отклонена", TAG);
+    if (sent != (int)len) {
+        log_message(LOG_ERR, "%s: Ошибка отправки: отправлено %d из %zu", TAG, sent, len);
+        return -1;
     }
     
     return 0;
 }
 
 /**
- * @brief Отправка работы на пул
+ * @brief Парсинг JSON ответа от пула
+ */
+int stratum_parse_response(pool_t *pool, const char *line)
+{
+    if (!pool || !line) return -1;
+    
+    /* Убираем лишний перевод строки для вывода в лог */
+    char clean_line[512];
+    strncpy(clean_line, line, sizeof(clean_line) - 1);
+    clean_line[sizeof(clean_line) - 1] = '\0';
+    char *nl = strchr(clean_line, '\n');
+    if (nl) *nl = '\0';
+    
+    log_message(LOG_DEBUG, "%s: <- %s", TAG, clean_line);
+    
+    /* Проверяем тип сообщения */
+    if (strstr(line, "mining.notify")) {
+        /* Новое задание от пула */
+        const char *params = strstr(line, "\"params\"");
+        if (params) {
+            params = strchr(params, ':');
+            if (params) {
+                parse_mining_notify(pool, params + 1);
+            }
+        }
+        
+    } else if (strstr(line, "mining.set_difficulty")) {
+        /* Установка сложности */
+        double diff = 0;
+        const char *params = strstr(line, "\"params\"");
+        if (params) {
+            params = strchr(params, '[');
+            if (params) {
+                params++;
+                diff = atof(params);
+            }
+        }
+        
+        if (diff > 0) {
+            pool->sdiff = diff;
+            log_message(LOG_INFO, "%s: Сложность: %.2f", TAG, pool->sdiff);
+        }
+        
+    } else if (strstr(line, "mining.set_extranonce")) {
+        /* Установка нового ExtraNonce от пула (BIP 310)
+         * Пул может изменить extranonce во время сессии */
+        char extranonce1_hex[64] = {0};
+        
+        /* Парсим параметры: ["extranonce1", extranonce2_size] */
+        const char *params = strstr(line, "\"params\"");
+        if (params) {
+            params = strchr(params, '[');
+            if (params) {
+                params++;  /* Пропускаем [ */
+                /* Ищем первую строку в кавычках */
+                const char *start = strchr(params, '"');
+                if (start) {
+                    start++;
+                    const char *end = strchr(start, '"');
+                    if (end && (end - start) < (int)sizeof(extranonce1_hex)) {
+                        strncpy(extranonce1_hex, start, end - start);
+                        
+                        /* Декодируем hex в бинарный формат */
+                        int len = hex_decode(extranonce1_hex, (uint8_t *)pool->extranonce1, 
+                                            sizeof(pool->extranonce1));
+                        if (len > 0) {
+                            pool->extranonce1_len = len;
+                            
+                            /* Ищем extranonce2_size после запятой */
+                            const char *comma = strchr(end, ',');
+                            if (comma) {
+                                pool->extranonce2_len = atoi(comma + 1);
+                                if (pool->extranonce2_len < 1) pool->extranonce2_len = 4;
+                                if (pool->extranonce2_len > 8) pool->extranonce2_len = 8;
+                            }
+                            
+                            log_message(LOG_INFO, "%s: ExtraNonce обновлён: len1=%d, len2=%d", 
+                                       TAG, pool->extranonce1_len, pool->extranonce2_len);
+                        }
+                    }
+                }
+            }
+        }
+        
+    } else if (strstr(line, "\"result\":true")) {
+        /* Успешный результат */
+        int id = 0;
+        json_get_int(line, "id", &id);
+        
+        if (id > 0) {
+            /* Это ответ на наш запрос */
+            if (!pool->stratum_auth) {
+                pool->stratum_auth = 1;
+                log_message(LOG_INFO, "%s: Авторизация успешна", TAG);
+            } else {
+                /* Шара принята */
+                pool->accepted++;
+                pool->total_diff += pool->sdiff;
+                log_message(LOG_INFO, "%s: Шара принята! Всего: %llu", 
+                           TAG, (unsigned long long)pool->accepted);
+            }
+        }
+        
+    } else if (strstr(line, "\"result\":false") || strstr(line, "\"error\":")) {
+        /* Ошибка или отклонение */
+        int id = 0;
+        json_get_int(line, "id", &id);
+        
+        if (strstr(line, "\"error\":null") && !strstr(line, "\"result\":false")) {
+            /* Это не ошибка, просто null error при успехе */
+        } else {
+            pool->rejected++;
+            log_message(LOG_WARNING, "%s: Шара отклонена или ошибка", TAG);
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief Обработка всех доступных ответов
+ */
+int stratum_process_responses(pool_t *pool)
+{
+    char *line;
+    int count = 0;
+    
+    while ((line = stratum_recv_line(pool)) != NULL) {
+        stratum_parse_response(pool, line);
+        free(line);
+        count++;
+    }
+    
+    return count;
+}
+
+/**
+ * @brief Отправка работы на пул (проверка очереди шар)
  */
 int stratum_send_work(pool_t *pool)
 {
-    /* TODO: Проверка очереди готовых шар и отправка */
+    /* Эта функция вызывается из задачи stratum_send */
+    /* Обрабатываем входящие сообщения */
+    stratum_process_responses(pool);
+    
     return 0;
 }
 
@@ -281,6 +774,48 @@ int stratum_submit(pool_t *pool, const char *job_id,
     pool->last_submit_time = time(NULL);
     
     return stratum_send_line(pool, msg);
+}
+
+/**
+ * @brief Получение текущей работы
+ */
+work_t *stratum_get_current_work(void)
+{
+    return current_work;
+}
+
+/**
+ * @brief Отправка найденного nonce на пул
+ * 
+ * Конвертирует бинарные данные в hex и вызывает stratum_submit.
+ * 
+ * @param pool  Указатель на пул
+ * @param work  Указатель на работу с найденным nonce
+ * @return      0 при успехе
+ */
+int stratum_submit_nonce(pool_t *pool, work_t *work)
+{
+    if (!pool || !work) return -1;
+    
+    char nonce2_hex[32] = {0};
+    char ntime_hex[16] = {0};
+    char nonce_hex[16] = {0};
+    
+    /* Конвертируем nonce2 в hex */
+    for (int i = 0; i < work->nonce2_len && i < 8; i++) {
+        sprintf(nonce2_hex + i * 2, "%02x", work->nonce2[i]);
+    }
+    
+    /* Конвертируем ntime в hex (big-endian для Stratum) */
+    sprintf(ntime_hex, "%08x", work->ntime);
+    
+    /* Конвертируем nonce в hex (big-endian для Stratum) */
+    sprintf(nonce_hex, "%08x", work->nonce);
+    
+    log_message(LOG_INFO, "%s: Submit: job=%s, nonce2=%s, ntime=%s, nonce=%s",
+               TAG, work->job_id, nonce2_hex, ntime_hex, nonce_hex);
+    
+    return stratum_submit(pool, work->job_id, nonce2_hex, ntime_hex, nonce_hex);
 }
 
 /* ===========================================================================

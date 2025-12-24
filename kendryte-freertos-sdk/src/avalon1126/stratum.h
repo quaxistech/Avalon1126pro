@@ -127,4 +127,31 @@ int stratum_subscribe(pool_t *pool);
  */
 int stratum_authorize(pool_t *pool);
 
+/**
+ * @brief Обработка всех доступных ответов от пула
+ * 
+ * @param pool  Указатель на пул
+ * @return      Количество обработанных сообщений
+ */
+int stratum_process_responses(pool_t *pool);
+
+/**
+ * @brief Получение текущей работы
+ * 
+ * @return Указатель на текущую работу или NULL
+ */
+struct work *stratum_get_current_work(void);
+
+/**
+ * @brief Отправка найденного nonce на пул (mining.submit)
+ * 
+ * Формирует JSON сообщение и отправляет на пул.
+ * Формат: {"id":N,"method":"mining.submit","params":["user","job_id","nonce2","ntime","nonce"]}
+ * 
+ * @param pool  Указатель на пул
+ * @param work  Указатель на работу с найденным nonce
+ * @return      0 при успехе, -1 при ошибке
+ */
+int stratum_submit_nonce(pool_t *pool, work_t *work);
+
 #endif /* __STRATUM_H__ */

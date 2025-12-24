@@ -52,6 +52,20 @@
 #include "api.h"            /* CGMiner API сервер */
 #include "network.h"        /* Сетевой модуль */
 #include "config.h"         /* Конфигурация */
+#include "mock_hardware.h"  /* Эмуляция оборудования */
+
+/* Kendryte SDK заголовки (только для реального железа) */
+#if !defined(MOCK_HARDWARE)
+#include <fpioa.h>
+#include <uart.h>
+#include <spi.h>
+#include <i2c.h>
+#include <gpio.h>
+#include <gpiohs.h>
+#include <pwm.h>
+#include <dmac.h>
+#include <sysctl.h>
+#endif
 
 /* ===========================================================================
  * КОНСТАНТЫ И МАКРООПРЕДЕЛЕНИЯ
@@ -60,8 +74,11 @@
 /**
  * @brief Версия API для совместимости с CGMiner клиентами
  * Строка найдена в декомпилированном коде: "API 3.2"
+ * Примечание: API_VERSION может быть определён в другом месте
  */
+#ifndef API_VERSION
 #define API_VERSION             "3.2"
+#endif
 
 /**
  * @brief Название устройства
@@ -161,8 +178,10 @@ time_t g_start_time = 0;
  * =========================================================================== */
 
 static const char *TAG = "CGMiner";                          /* Тег для логов */
-static const char *s_cgminer_version = "cgminer " CGMINER_VERSION;
-static const char *s_api_version = API_VERSION;
+
+/* Версии для использования в API ответах */
+__attribute__((unused)) static const char *s_cgminer_version = "cgminer " CGMINER_VERSION;
+__attribute__((unused)) static const char *s_api_version = API_VERSION;
 
 /**
  * @brief Названия стратегий выбора пула
@@ -206,13 +225,14 @@ static void print_banner(void);          /* Вывод приветственн�
 static TaskHandle_t task_stratum_send = NULL;  /* Отправка Stratum данных */
 static TaskHandle_t task_stratum_recv = NULL;  /* Приём Stratum данных */
 static TaskHandle_t task_watchdog = NULL;      /* Сторожевой таймер */
-static TaskHandle_t task_misc = NULL;          /* Разные операции */
-static TaskHandle_t task_mmu = NULL;           /* Управление памятью */
 static TaskHandle_t task_monitor = NULL;       /* Мониторинг температуры */
 static TaskHandle_t task_http = NULL;          /* HTTP сервер */
 static TaskHandle_t task_api = NULL;           /* API сервер (порт 4028) */
 static TaskHandle_t task_led = NULL;           /* Управление LED индикаторами */
-static TaskHandle_t task_iic = NULL;           /* I2C коммуникация */
+/* Зарезервировано для будущего использования */
+__attribute__((unused)) static TaskHandle_t task_misc = NULL;  /* Разные операции */
+__attribute__((unused)) static TaskHandle_t task_mmu = NULL;   /* Управление памятью */
+__attribute__((unused)) static TaskHandle_t task_iic = NULL;   /* I2C коммуникация */
 
 /* ===========================================================================
  * ФУНКЦИЯ: log_message
@@ -291,42 +311,106 @@ static void main_init_hardware(void)
 {
     log_message(LOG_INFO, "Инициализация оборудования...");
     
+#ifdef MOCK_HARDWARE
+    /* Режим эмуляции - инициализируем mock-слой */
+    log_message(LOG_INFO, "Режим эмуляции оборудования");
+    
+    #if MOCK_SPI_FLASH
+    mock_flash_init();
+    #endif
+    
+    #if MOCK_NETWORK
+    mock_network_init();
+    #endif
+    
+    #if MOCK_ASIC
+    mock_asic_init();
+    #endif
+    
+#else
+    /* Реальное оборудование K210 */
+    
     /* 
      * FPIOA (Field Programmable IO Array)
      * Настройка мультиплексора пинов K210
-     * Каждый пин может выполнять разные функции
      */
-    // fpioa_init();
+    /* SPI0 для ASIC */
+    fpioa_set_function(6, FUNC_SPI0_SCLK);
+    fpioa_set_function(7, FUNC_SPI0_D0);    /* MOSI */
+    fpioa_set_function(8, FUNC_SPI0_D1);    /* MISO */
     
-    /*
-     * UART (Universal Asynchronous Receiver-Transmitter)
-     * Для отладочного вывода и консоли
-     */
-    // uart_init();
+    /* SPI1 для Ethernet DM9051 */
+    fpioa_set_function(9, FUNC_SPI1_SCLK);
+    fpioa_set_function(10, FUNC_SPI1_D0);
+    fpioa_set_function(11, FUNC_SPI1_D1);
     
-    /*
-     * SPI (Serial Peripheral Interface)
-     * Высокоскоростная связь с ASIC чипами Avalon10
-     */
-    // spi_init();
+    /* I2C для датчиков температуры */
+    fpioa_set_function(14, FUNC_I2C0_SCLK);
+    fpioa_set_function(15, FUNC_I2C0_SDA);
     
-    /*
-     * I2C (Inter-Integrated Circuit)
-     * Для датчиков температуры и другой периферии
-     */
-    // i2c_init();
+    /* UART для отладки */
+    fpioa_set_function(4, FUNC_UART1_TX);
+    fpioa_set_function(5, FUNC_UART1_RX);
     
-    /*
-     * GPIO (General Purpose Input/Output)
-     * Для LED индикаторов и управляющих сигналов
-     */
-    // gpio_init();
+    /* GPIO для CS линий ASIC (модули 0-3) */
+    fpioa_set_function(20, FUNC_GPIOHS0);   /* CS0 */
+    fpioa_set_function(21, FUNC_GPIOHS1);   /* CS1 */
+    fpioa_set_function(22, FUNC_GPIOHS2);   /* CS2 */
+    fpioa_set_function(23, FUNC_GPIOHS3);   /* CS3 */
     
-    /*
-     * Ethernet
-     * DM9051 SPI Ethernet контроллер
-     */
-    // ethernet_init();
+    /* GPIO для Ethernet CS */
+    fpioa_set_function(12, FUNC_GPIOHS4);   /* ETH_CS */
+    fpioa_set_function(13, FUNC_GPIOHS5);   /* ETH_INT */
+    
+    /* PWM для вентиляторов */
+    fpioa_set_function(16, FUNC_TIMER0_TOGGLE1);   /* FAN1 */
+    fpioa_set_function(17, FUNC_TIMER0_TOGGLE2);   /* FAN2 */
+    
+    /* LED индикаторы */
+    fpioa_set_function(24, FUNC_GPIOHS6);   /* LED_GREEN */
+    fpioa_set_function(25, FUNC_GPIOHS7);   /* LED_RED */
+    
+    /* Инициализация GPIO для CS */
+    for (int i = 0; i < 4; i++) {
+        gpiohs_set_drive_mode(i, GPIO_DM_OUTPUT);
+        gpiohs_set_pin(i, GPIO_PV_HIGH);    /* CS high (deselect) */
+    }
+    
+    /* Ethernet CS и INT */
+    gpiohs_set_drive_mode(4, GPIO_DM_OUTPUT);
+    gpiohs_set_pin(4, GPIO_PV_HIGH);
+    gpiohs_set_drive_mode(5, GPIO_DM_INPUT);
+    
+    /* LED GPIO */
+    gpiohs_set_drive_mode(6, GPIO_DM_OUTPUT);
+    gpiohs_set_drive_mode(7, GPIO_DM_OUTPUT);
+    gpiohs_set_pin(6, GPIO_PV_LOW);
+    gpiohs_set_pin(7, GPIO_PV_LOW);
+    
+    /* Инициализация UART */
+    uart_init(UART_DEVICE_1);
+    uart_configure(UART_DEVICE_1, 115200, UART_BITWIDTH_8BIT, 
+                   UART_STOP_1, UART_PARITY_NONE);
+    
+    /* Инициализация SPI0 для ASIC */
+    spi_init(SPI_DEVICE_0, SPI_WORK_MODE_0, SPI_FF_STANDARD, 8, 0);
+    spi_set_clk_rate(SPI_DEVICE_0, 10000000);   /* 10 MHz */
+    
+    /* Инициализация SPI1 для Ethernet */
+    spi_init(SPI_DEVICE_1, SPI_WORK_MODE_0, SPI_FF_STANDARD, 8, 0);
+    spi_set_clk_rate(SPI_DEVICE_1, 10000000);
+    
+    /* Инициализация I2C */
+    i2c_init(I2C_DEVICE_0, 0x50, 7, 100000);
+    
+    /* Инициализация PWM для вентиляторов */
+    pwm_init(PWM_DEVICE_0);
+    pwm_set_frequency(PWM_DEVICE_0, PWM_CHANNEL_0, 25000, 0.5);  /* 25kHz, 50% */
+    pwm_set_frequency(PWM_DEVICE_0, PWM_CHANNEL_1, 25000, 0.5);
+    pwm_set_enable(PWM_DEVICE_0, PWM_CHANNEL_0, 1);
+    pwm_set_enable(PWM_DEVICE_0, PWM_CHANNEL_1, 1);
+    
+#endif /* MOCK_HARDWARE */
     
     log_message(LOG_INFO, "Оборудование инициализировано");
 }

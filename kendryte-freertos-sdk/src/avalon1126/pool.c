@@ -28,9 +28,12 @@
 
 #include <FreeRTOS.h>
 #include <semphr.h>
+#include <task.h>
 
 #include "pool.h"
 #include "cgminer.h"
+#include "network.h"
+#include "stratum.h"
 
 /* ===========================================================================
  * ЛОКАЛЬНЫЕ КОНСТАНТЫ
@@ -216,17 +219,37 @@ int connect_pool(pool_t *pool)
         return -1;
     }
     
+    /* Проверяем сеть */
+    if (!network_is_connected()) {
+        log_message(LOG_ERR, "%s: Сеть не подключена", TAG);
+        pool->state = POOL_STATE_DEAD;
+        return -1;
+    }
+    
     log_message(LOG_INFO, "%s: Подключение к %s:%d...", TAG, pool->host, pool->port);
     
     pool->state = POOL_STATE_CONNECTING;
     
-    /* TODO: Реальное TCP подключение через lwIP
-     * pool->sock = socket(AF_INET, SOCK_STREAM, 0);
-     * connect(pool->sock, ...);
-     */
+    /* Создаём TCP сокет */
+    pool->sock = network_socket_create();
+    if (pool->sock < 0) {
+        log_message(LOG_ERR, "%s: Не удалось создать сокет", TAG);
+        pool->state = POOL_STATE_DEAD;
+        pool->fail_count++;
+        return -1;
+    }
     
-    /* Симуляция успешного подключения */
-    pool->sock = 1;
+    /* Подключаемся к серверу */
+    if (network_socket_connect(pool->sock, pool->host, pool->port) < 0) {
+        log_message(LOG_ERR, "%s: Не удалось подключиться к %s:%d", TAG, pool->host, pool->port);
+        network_socket_close(pool->sock);
+        pool->sock = -1;
+        pool->state = POOL_STATE_DEAD;
+        pool->fail_count++;
+        pool->last_fail = time(NULL);
+        return -1;
+    }
+    
     pool->state = POOL_STATE_CONNECTED;
     pool->connect_time = time(NULL);
     pool->fail_count = 0;
@@ -244,7 +267,7 @@ void disconnect_pool(pool_t *pool)
     if (!pool) return;
     
     if (pool->sock >= 0) {
-        /* close(pool->sock); */
+        network_socket_close(pool->sock);
         pool->sock = -1;
     }
     

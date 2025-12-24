@@ -269,6 +269,70 @@ int api_handle_request(const char *request, char *response, int resp_len)
     }
 }
 
+/* ===========================================================================
+ * TCP SERVER IMPLEMENTATION
+ * =========================================================================== */
+
+#include "network.h"
+
+static int api_server_socket = -1;
+static int api_server_running = 0;
+
+/**
+ * @brief Обработка одного клиентского подключения
+ */
+static void api_handle_client(int client_sock)
+{
+    char request[256];
+    char response[4096];
+    int recv_len;
+    
+    /* Получаем команду */
+    recv_len = network_socket_recv(client_sock, request, sizeof(request) - 1, 5000);
+    
+    if (recv_len > 0) {
+        request[recv_len] = '\0';
+        
+        /* Обрабатываем запрос */
+        int resp_len = api_handle_request(request, response, sizeof(response));
+        
+        /* Отправляем ответ */
+        if (resp_len > 0) {
+            network_socket_send(client_sock, response, resp_len);
+        }
+    }
+    
+    /* Закрываем соединение */
+    network_socket_close(client_sock);
+}
+
+/**
+ * @brief Задача API сервера
+ */
+static void api_server_task(void *param)
+{
+    int port = (int)(intptr_t)param;
+    int client_sock;
+    
+    log_message(LOG_INFO, "%s: API сервер запущен на порту %d", TAG, port);
+    
+    while (api_server_running) {
+        /* Ждём нового подключения */
+        client_sock = network_socket_accept(api_server_socket, 1000);
+        
+        if (client_sock >= 0) {
+            log_message(LOG_DEBUG, "%s: Новое API подключение", TAG);
+            api_handle_client(client_sock);
+        }
+        
+        /* Даём другим задачам время */
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    log_message(LOG_INFO, "%s: API сервер остановлен", TAG);
+    vTaskDelete(NULL);
+}
+
 /**
  * @brief Запуск API сервера
  */
@@ -276,7 +340,32 @@ int api_server_start(int port)
 {
     log_message(LOG_INFO, "%s: Запуск API сервера на порту %d", TAG, port);
     
-    /* TODO: Реальный TCP сервер на lwIP */
+    /* Создаём серверный сокет */
+    api_server_socket = network_socket_create();
+    if (api_server_socket < 0) {
+        log_message(LOG_ERR, "%s: Не удалось создать сокет", TAG);
+        return -1;
+    }
+    
+    /* Начинаем слушать */
+    if (network_socket_listen(api_server_socket, port, 5) < 0) {
+        log_message(LOG_ERR, "%s: Не удалось начать прослушивание порта %d", TAG, port);
+        network_socket_close(api_server_socket);
+        api_server_socket = -1;
+        return -1;
+    }
+    
+    api_server_running = 1;
+    
+    /* Создаём задачу API сервера */
+    xTaskCreate(
+        api_server_task,
+        "api_server",
+        4096,
+        (void *)(intptr_t)port,
+        API_TASK_PRIORITY,
+        NULL
+    );
     
     return 0;
 }
@@ -287,6 +376,13 @@ int api_server_start(int port)
 void api_server_stop(void)
 {
     log_message(LOG_INFO, "%s: Остановка API сервера", TAG);
+    
+    api_server_running = 0;
+    
+    if (api_server_socket >= 0) {
+        network_socket_close(api_server_socket);
+        api_server_socket = -1;
+    }
 }
 
 /* ===========================================================================
